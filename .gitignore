@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Raw JSON snapshots are too large for git (~4MB/day each)
+# They're kept locally + uploaded as GitHub Actions artifacts (90-day retention)
+# The SQLite DB is the source of truth and IS committed
+data/daily_snapshots/
+data/daily_fixtures/
+
+# Large files from other work
+data/raw/
+data/season_ppg_*.pkl
+data/algo_element_mapping.json
+data/fpl_database.db
+
+# Keep the price tracker DB (this IS the cloud backup)
+!data/price_tracker.db
