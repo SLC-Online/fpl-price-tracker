@@ -2,21 +2,17 @@ name: FPL Data Scrape
 
 on:
   schedule:
-    # Every hour — maximum granularity to observe exactly when values change
+    # Every hour
     - cron: '0 * * * *'
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,10 +22,12 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run scraper
+      - name: Run scraper (Supabase)
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SCRAPE_SOURCE: github-actions
-        run: python daily_scrape.py
+        run: python scrape_supabase.py
 
       - name: Upload raw JSON as artifact (90-day retention)
         uses: actions/upload-artifact@v4
@@ -39,17 +37,3 @@ jobs:
             data/daily_snapshots/
             data/daily_fixtures/
           retention-days: 90
-
-      - name: Commit and push data
-        run: |
-          git config user.name "FPL Scraper Bot"
-          git config user.email "scraper@github-actions"
-          git add data/fpl_tracker.db
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            TIMESTAMP=$(date -u +%Y-%m-%d_%H%M)
-            git commit -m "data: scrape ${TIMESTAMP}"
-            git pull --rebase || true
-            git push
-          fi
