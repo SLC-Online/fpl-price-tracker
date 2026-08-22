@@ -21,6 +21,13 @@ from argparse import ArgumentParser
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, "data", "fpl_tracker.db")
 
+# Import AI resolver (optional — works without it, just flags instead of resolving)
+try:
+    from ai_resolve import resolve_batch
+    AI_AVAILABLE = bool(os.environ.get("GEMINI_API_KEY"))
+except ImportError:
+    AI_AVAILABLE = False
+
 # CSV team abbreviations → FPL API short names
 TEAM_MAP = {
     'ARS': 'ARS', 'AVL': 'AVL', 'BOU': 'BOU', 'BRE': 'BRE',
@@ -265,6 +272,7 @@ def import_csv(filepath, season, gameweek):
     matched = 0
     unmatched = []
     low_confidence = []
+    needs_ai = []  # Players that fuzzy matching couldn't resolve confidently
 
     for row in csv_rows:
         csv_name = row['name']
@@ -286,26 +294,81 @@ def import_csv(filepath, season, gameweek):
         # Try to match
         best_match, score = match_player(csv_name, csv_team_api, api_players)
 
-        if best_match and score >= 0.75:
+        if best_match and score >= 0.85:
+            # High confidence — accept automatically
             element_id = best_match['id']
-            # Save mapping
             conn.execute("""INSERT OR REPLACE INTO csv_name_mapping
                 (csv_name, csv_team, element_id, confidence, source, season)
                 VALUES (?, ?, ?, ?, 'auto', ?)""",
                 (csv_name, csv_team, element_id, score, season))
             _insert_import(conn, season, gameweek, element_id, row)
             matched += 1
-
-            if score < 0.85:
-                low_confidence.append((csv_name, csv_team, best_match['web_name'], score))
+        elif best_match and score >= 0.75:
+            # Medium confidence — accept but flag for review
+            element_id = best_match['id']
+            conn.execute("""INSERT OR REPLACE INTO csv_name_mapping
+                (csv_name, csv_team, element_id, confidence, source, season)
+                VALUES (?, ?, ?, ?, 'auto', ?)""",
+                (csv_name, csv_team, element_id, score, season))
+            _insert_import(conn, season, gameweek, element_id, row)
+            matched += 1
+            low_confidence.append((csv_name, csv_team, best_match['web_name'], score))
         else:
-            # No good match
+            # Low confidence — queue for AI resolution
+            needs_ai.append({
+                'csv_name': csv_name, 'csv_team': csv_team_api,
+                'csv_position': row['position'], 'csv_price': row['price'],
+                'row': row, 'best_guess': best_match, 'score': score,
+            })
+
+    # AI RESOLUTION STEP — only for players the fuzzy matcher couldn't handle
+    if needs_ai and AI_AVAILABLE:
+        print(f"\n  Attempting AI resolution for {len(needs_ai)} uncertain matches...")
+        ai_resolved = resolve_batch(needs_ai, conn)
+
+        for player_info in needs_ai:
+            key = (player_info['csv_name'], player_info['csv_team'])
+            if key in ai_resolved:
+                element_id = ai_resolved[key]
+                conn.execute("""INSERT OR REPLACE INTO csv_name_mapping
+                    (csv_name, csv_team, element_id, confidence, source, season, notes)
+                    VALUES (?, ?, ?, 0.95, 'ai', ?, 'Resolved by Gemini')""",
+                    (player_info['csv_name'], player_info['csv_team'],  # Use original csv_team not API team
+                     element_id, season))
+                # Need to map back to original csv_team for the mapping table
+                # Fix: find original csv_team from the row
+                orig_team = player_info['row']['team']
+                conn.execute("""INSERT OR REPLACE INTO csv_name_mapping
+                    (csv_name, csv_team, element_id, confidence, source, season, notes)
+                    VALUES (?, ?, ?, 0.95, 'ai', ?, 'Resolved by Gemini')""",
+                    (player_info['csv_name'], orig_team, element_id, season))
+                _insert_import(conn, season, gameweek, element_id, player_info['row'])
+                matched += 1
+            else:
+                # AI couldn't resolve either — truly unmatched
+                best = player_info['best_guess']
+                conn.execute("""INSERT OR REPLACE INTO csv_name_mapping
+                    (csv_name, csv_team, element_id, confidence, source, season, notes)
+                    VALUES (?, ?, NULL, ?, 'unmatched', ?, ?)""",
+                    (player_info['csv_name'], player_info['row']['team'],
+                     player_info['score'] if best else 0, season,
+                     f"Best guess: {best['web_name'] if best else 'none'} ({player_info['score']:.2f})"))
+                unmatched.append((player_info['csv_name'], player_info['row']['team'],
+                                  best['web_name'] if best else '???', player_info['score']))
+    elif needs_ai:
+        # No AI available — all go to unmatched
+        if needs_ai:
+            print(f"\n  {len(needs_ai)} players need resolution (no GEMINI_API_KEY set)")
+        for player_info in needs_ai:
+            best = player_info['best_guess']
             conn.execute("""INSERT OR REPLACE INTO csv_name_mapping
                 (csv_name, csv_team, element_id, confidence, source, season, notes)
                 VALUES (?, ?, NULL, ?, 'unmatched', ?, ?)""",
-                (csv_name, csv_team, score if best_match else 0,
-                 season, f"Best guess: {best_match['web_name'] if best_match else 'none'} ({score:.2f})"))
-            unmatched.append((csv_name, csv_team, best_match['web_name'] if best_match else '???', score))
+                (player_info['csv_name'], player_info['row']['team'],
+                 player_info['score'] if best else 0, season,
+                 f"Best guess: {best['web_name'] if best else 'none'} ({player_info['score']:.2f})"))
+            unmatched.append((player_info['csv_name'], player_info['row']['team'],
+                              best['web_name'] if best else '???', player_info['score']))
 
     conn.commit()
 
