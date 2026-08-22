@@ -50,5 +50,6 @@ jobs:
           else
             TIMESTAMP=$(date -u +%Y-%m-%d_%H%M)
             git commit -m "data: scrape ${TIMESTAMP}"
+            git pull --rebase || true
             git push
           fi
