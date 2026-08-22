@@ -2,9 +2,8 @@ name: FPL Data Scrape
 
 on:
   schedule:
-    # Every 2 hours — captures transfer flow dynamics throughout the day
-    # Lets us see exactly when surges happen (post-match, post-deadline, overnight)
-    - cron: '0 */2 * * *'
+    # Every hour — maximum granularity to observe exactly when values change
+    - cron: '0 * * * *'
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
