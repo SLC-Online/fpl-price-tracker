@@ -132,7 +132,7 @@ def scrape():
         in_dreamteam INTEGER,
         dreamteam_count INTEGER,
         special INTEGER,
-        PRIMARY KEY(date, element)
+        PRIMARY KEY(date, timestamp, element)
     )""")
 
     conn.execute("""CREATE TABLE IF NOT EXISTS price_changes_detected (
@@ -161,12 +161,12 @@ def scrape():
         PRIMARY KEY(date, event_id)
     )""")
 
-    # Get previous day's prices for change detection
+    # Get previous snapshot's prices for change detection
     prev_prices = {}
     cursor = conn.execute("""
         SELECT element, now_cost FROM players_daily
-        WHERE date = (SELECT MAX(date) FROM players_daily WHERE date < ?)
-    """, (today,))
+        WHERE timestamp = (SELECT MAX(timestamp) FROM players_daily WHERE timestamp < ?)
+    """, (timestamp,))
     for row in cursor:
         prev_prices[row[0]] = row[1]
 
