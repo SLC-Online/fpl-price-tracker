@@ -1,11 +1,10 @@
-name: Daily FPL Data Scrape
+name: FPL Data Scrape
 
 on:
   schedule:
-    # Run at 01:00 UTC (02:00 BST) - before price changes typically happen at ~02:30 BST
-    - cron: '0 1 * * *'
-    # Also run at 03:00 UTC (04:00 BST) - to capture the state AFTER price changes
-    - cron: '0 3 * * *'
+    # Every 2 hours — captures transfer flow dynamics throughout the day
+    # Lets us see exactly when surges happen (post-match, post-deadline, overnight)
+    - cron: '0 */2 * * *'
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -44,13 +43,11 @@ jobs:
         run: |
           git config user.name "FPL Scraper Bot"
           git config user.email "scraper@github-actions"
-          # Only commit the SQLite DB (raw JSON is in artifacts)
           git add data/price_tracker.db
-          # Only commit if there are changes
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            DATE=$(date -u +%Y-%m-%d_%H%M)
-            git commit -m "data: daily scrape ${DATE}"
+            TIMESTAMP=$(date -u +%Y-%m-%d_%H%M)
+            git commit -m "data: scrape ${TIMESTAMP}"
             git push
           fi
