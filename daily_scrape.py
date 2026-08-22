@@ -15,11 +15,24 @@ SNAPSHOT_DIR = os.path.join(SCRIPT_DIR, "data", "daily_snapshots")
 FIXTURE_DIR = os.path.join(SCRIPT_DIR, "data", "daily_fixtures")
 
 
-def fetch_api(url):
-    resp = requests.get(url, timeout=30)
-    if resp.status_code != 200:
-        raise Exception(f"API {url} returned {resp.status_code}")
-    return resp.json()
+def fetch_api(url, retries=3):
+    """Fetch with retry logic for resilience."""
+    import time
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 503 and attempt < retries - 1:
+                time.sleep(30)  # FPL API often 503s during updates
+                continue
+            raise Exception(f"API {url} returned {resp.status_code}")
+        except requests.exceptions.Timeout:
+            if attempt < retries - 1:
+                time.sleep(10)
+                continue
+            raise
+    raise Exception(f"API {url} failed after {retries} attempts")
 
 
 def scrape():
