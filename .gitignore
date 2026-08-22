@@ -26,5 +26,5 @@ data/season_ppg_*.pkl
 data/algo_element_mapping.json
 data/fpl_database.db
 
-# Keep the price tracker DB (this IS the cloud backup)
-!data/price_tracker.db
+# Keep the tracker DB (this IS the cloud backup)
+!data/fpl_tracker.db

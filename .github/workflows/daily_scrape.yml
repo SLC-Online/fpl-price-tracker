@@ -27,6 +27,8 @@ jobs:
         run: pip install requests
 
       - name: Run scraper
+        env:
+          SCRAPE_SOURCE: github-actions
         run: python daily_scrape.py
 
       - name: Upload raw JSON as artifact (90-day retention)
@@ -42,7 +44,7 @@ jobs:
         run: |
           git config user.name "FPL Scraper Bot"
           git config user.email "scraper@github-actions"
-          git add data/price_tracker.db
+          git add data/fpl_tracker.db
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
