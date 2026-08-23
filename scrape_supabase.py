@@ -10,6 +10,7 @@ Runs hourly via GitHub Actions.
 """
 import requests, json, os, time
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
@@ -105,7 +106,8 @@ def scrape():
     supabase_post("snapshots", snapshot_data)
 
     # Get the snapshot_id we just created
-    snaps = supabase_get("snapshots", f"timestamp=eq.{timestamp}&select=snapshot_id")
+    encoded_ts = quote(timestamp, safe='')
+    snaps = supabase_get("snapshots", f"timestamp=eq.{encoded_ts}&select=snapshot_id")
     if not snaps:
         raise Exception("Failed to retrieve snapshot_id after insert")
     snapshot_id = snaps[0]['snapshot_id']
