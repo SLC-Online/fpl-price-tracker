@@ -1,0 +1,31 @@
+name: Scrape External Projections
+
+on:
+  schedule:
+    # Run twice daily: 12:00 UTC and 17:00 UTC
+    # Covers most deadline windows (deadlines vary between 10:00-17:30 UTC)
+    - cron: '0 12 * * *'
+    - cron: '0 17 * * *'
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Scrape projections
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scrape_projections.py
