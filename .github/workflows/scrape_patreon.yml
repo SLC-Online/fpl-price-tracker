@@ -2,8 +2,9 @@ name: Import Transfer Algorithm from Patreon
 
 on:
   schedule:
-    # Check every 6 hours for new posts
-    - cron: '0 */6 * * *'
+    # Check hourly — the actual check is one cheap API call
+    # Only downloads/imports when a new GW post is detected
+    - cron: '0 * * * *'
   workflow_dispatch:  # Manual trigger
 
 jobs:
