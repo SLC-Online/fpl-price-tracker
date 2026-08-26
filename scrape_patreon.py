@@ -131,12 +131,28 @@ def get_post_csv(post_id):
     return None
 
 
-def get_already_imported_gws():
-    """Check which GWs we've already imported."""
-    rows = supabase_get("csv_imports?select=gameweek&season=eq.2026-27&order=gameweek.desc&limit=1")
-    if rows:
-        return rows[0]['gameweek']
-    return 0
+def get_last_import_timestamp():
+    """Get the published_at of the last Patreon post we imported.
+    
+    Stores tracking info in a special row in csv_imports with element_id=0.
+    """
+    rows = supabase_get("csv_imports?select=csv_name&season=eq.2026-27&element_id=eq.0&csv_team=eq.__patreon_meta__&limit=1")
+    if rows and rows[0].get('csv_name'):
+        return rows[0]['csv_name']  # We store published_at in csv_name for the meta row
+    return None
+
+
+def set_last_import_timestamp(published_at):
+    """Store the published_at of the post we just imported."""
+    meta_row = [{
+        'season': '2026-27',
+        'gameweek': 0,
+        'element_id': 0,
+        'csv_name': published_at,
+        'csv_team': '__patreon_meta__',
+        'position': 'META',
+    }]
+    supabase_post("csv_imports", meta_row, "season,element_id,csv_team")
 
 
 def get_players_db():
@@ -190,7 +206,7 @@ def match_player(csv_name, csv_team_api, players):
     return best_match, best_score
 
 
-def import_csv(csv_bytes, gameweek, season='2026-27'):
+def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
     """Parse CSV and import into Supabase."""
     text = csv_bytes.decode('latin-1')
     reader = csv.reader(StringIO(text))
@@ -316,14 +332,14 @@ def main():
 
     print(f"  Latest post: '{latest['title']}' (GW{latest['gameweek']}, published {latest['published_at']})")
 
-    # Check if we've already imported this GW
-    last_imported = get_already_imported_gws()
-    if latest['gameweek'] <= last_imported:
-        print(f"  Already imported GW{latest['gameweek']} (last imported: GW{last_imported}). Nothing to do.")
+    # Check if this post is newer than what we last imported
+    last_published = get_last_import_timestamp()
+    if last_published and latest['published_at'] <= last_published:
+        print(f"  Already imported this version (post published {latest['published_at']}, last import from {last_published}). Nothing to do.")
         return
 
-    # New GW available - download CSV
-    print(f"  New GW{latest['gameweek']} available! Downloading CSV...")
+    # New or updated post - download CSV
+    print(f"  New/updated post detected! Downloading CSV...")
     csv_bytes = get_post_csv(latest['post_id'])
     if not csv_bytes:
         print("  ERROR: Could not download CSV")
@@ -331,9 +347,12 @@ def main():
 
     print(f"  CSV downloaded: {len(csv_bytes)} bytes")
 
-    # Import
-    matched, unmatched = import_csv(csv_bytes, latest['gameweek'])
+    # Import (upserts — will overwrite previous values for same GW)
+    matched, unmatched = import_csv(csv_bytes, latest['gameweek'], published_at=latest['published_at'])
     print(f"  Import complete: {matched} matched, {len(unmatched)} unmatched")
+    if matched > 0:
+        set_last_import_timestamp(latest['published_at'])
+        print(f"  Saved import timestamp: {latest['published_at']}")
     if unmatched:
         print(f"  Unmatched: {unmatched[:10]}")
         if len(unmatched) > 10:
