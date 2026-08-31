@@ -473,9 +473,12 @@ def main():
 
     # Check if this post is newer than what we last imported
     last_published = get_last_import_timestamp()
-    if last_published and latest['published_at'] <= last_published:
+    force = os.environ.get("FORCE_REIMPORT", "").strip().lower() in ("1", "true", "yes")
+    if last_published and latest['published_at'] <= last_published and not force:
         print(f"  Already imported this version (post published {latest['published_at']}, last import from {last_published}). Nothing to do.")
         return
+    if force:
+        print("  FORCE_REIMPORT set — re-importing regardless of timestamp")
 
     # New or updated post - download CSV
     print(f"  New/updated post detected! Downloading CSV...")

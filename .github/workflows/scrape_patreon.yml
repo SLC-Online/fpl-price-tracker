@@ -7,6 +7,11 @@ on:
     # Cost: ~490 of 2000 free Actions minutes per month
     - cron: '*/15 * * * *'
   workflow_dispatch:  # Manual trigger
+    inputs:
+      force_reimport:
+        description: 'Re-import the latest post even if already imported (fixes/refreshes data)'
+        type: boolean
+        default: false
 
 jobs:
   import:
@@ -29,4 +34,5 @@ jobs:
           PATREON_SESSION: ${{ secrets.PATREON_SESSION }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          FORCE_REIMPORT: ${{ inputs.force_reimport }}
         run: python scrape_patreon.py
