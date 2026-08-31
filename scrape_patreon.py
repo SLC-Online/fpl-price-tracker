@@ -91,9 +91,16 @@ def get_latest_post():
 
 
 def get_post_csv(post_id):
-    """Download the CSV attachment from a Patreon post."""
-    # Fetch full post with includes
-    url = f"https://www.patreon.com/api/posts/{post_id}?include=attachments&fields[post]=title,content&fields[attachment]=name,url"
+    """Download the CSV from a Patreon post.
+
+    The CSV is delivered as a 'media' item (under attachments_media), with
+    file_name + download_url fields. Older Patreon posts used 'attachment'
+    items with name + url — we handle both.
+    """
+    # Request all attachment/media relationships and their file fields
+    includes = "attachments,attachments_media,media"
+    fields = "fields[post]=title,content&fields[media]=file_name,download_url,mimetype&fields[attachment]=name,url"
+    url = f"https://www.patreon.com/api/posts/{post_id}?include={includes}&{fields}"
     resp = requests.get(url, headers=HEADERS_PATREON, timeout=15)
     if resp.status_code != 200:
         print(f"  Post fetch error: {resp.status_code}")
@@ -102,22 +109,34 @@ def get_post_csv(post_id):
     data = resp.json()
     included = data.get('included', [])
 
-    # Find CSV attachment
+    # 1. Look for a media item that is a CSV (current Patreon format)
+    for item in included:
+        if item.get('type') == 'media':
+            attrs = item.get('attributes', {})
+            fname = (attrs.get('file_name') or '').lower()
+            mimetype = (attrs.get('mimetype') or '').lower()
+            dl = attrs.get('download_url', '')
+            if fname.endswith('.csv') or 'csv' in mimetype or 'transferalgorithm' in fname:
+                print(f"  Found CSV media: {attrs.get('file_name')}")
+                csv_resp = requests.get(dl, headers=HEADERS_PATREON, timeout=30)
+                if csv_resp.status_code == 200:
+                    return csv_resp.content
+                print(f"  Download failed: {csv_resp.status_code}")
+
+    # 2. Legacy: look for an 'attachment' item
     for item in included:
         if item.get('type') == 'attachment':
             attrs = item.get('attributes', {})
-            name = attrs.get('name', '')
-            url = attrs.get('url', '')
-            if name.lower().endswith('.csv') or 'transferalgorithm' in name.lower():
-                print(f"  Found attachment: {name}")
-                # Download the CSV
-                csv_resp = requests.get(url, headers=HEADERS_PATREON, timeout=30)
+            name = (attrs.get('name') or '').lower()
+            att_url = attrs.get('url', '')
+            if name.endswith('.csv') or 'transferalgorithm' in name:
+                print(f"  Found attachment: {attrs.get('name')}")
+                csv_resp = requests.get(att_url, headers=HEADERS_PATREON, timeout=30)
                 if csv_resp.status_code == 200:
                     return csv_resp.content
-                else:
-                    print(f"  Download failed: {csv_resp.status_code}")
+                print(f"  Download failed: {csv_resp.status_code}")
 
-    # Maybe the CSV link is in the post content
+    # 3. Fallback: CSV link embedded in post content
     content = data.get('data', {}).get('attributes', {}).get('content', '')
     if content:
         csv_links = re.findall(r'https?://[^\s"<]+\.csv[^\s"<]*', content)
