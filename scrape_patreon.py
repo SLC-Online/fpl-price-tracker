@@ -297,6 +297,26 @@ def match_player(csv_name, csv_team_api, players):
     return best_match, best_score
 
 
+def parse_bcv(raw):
+    """Parse a BCV cell. The CSV uses accounting notation where parentheses
+    denote negatives, e.g. '(0.15)' = -0.15. Also strips % and whitespace.
+    Returns a float, or None if blank/unparseable."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s == '-':
+        return None
+    negative = s.startswith('(') and s.endswith(')')
+    s = s.strip('()').replace('%', '').replace(',', '').strip()
+    if not s or s == '-':
+        return None
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    return -val if negative else val
+
+
 def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
     """Parse CSV and import into Supabase."""
     text = csv_bytes.decode('latin-1')
@@ -324,7 +344,7 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
             continue
 
         try:
-            bcv = float(row[1].strip()) if row[1].strip() and row[1].strip() != '-' else None
+            bcv = parse_bcv(row[1])
             position = row[2].strip()
             price = float(row[5].strip()) if row[5].strip() and row[5].strip() != '-' else None
             gw_proj = []
