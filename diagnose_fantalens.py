@@ -3,29 +3,32 @@
 /players listing expose per player, and is there a way to get more?"""
 import requests, re, json
 
-resp = requests.get('https://fantalens.com/players?page=1', timeout=20,
-                    headers={'User-Agent': 'Mozilla/5.0'})
-print(f"Status: {resp.status_code}")
-scripts = re.findall(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>', resp.text, re.DOTALL)
-print(f"JSON scripts found: {len(scripts)}")
+def fetch(url):
+    resp = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
+    scripts = re.findall(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>', resp.text, re.DOTALL)
+    if not scripts:
+        return None
+    return json.loads(scripts[0])
 
-if scripts:
-    data = json.loads(scripts[0])
-    props = data.get('props') or {}
-    print(f"props keys: {list(props.keys())}")
-    players = props.get('players') or []
-    print(f"players on page 1: {len(players)}")
-    if players:
-        p = players[0]
-        print(f"\nfirst player keys: {list(p.keys())}")
-        xp = p.get('xpts')
-        print(f"xpts type: {type(xp).__name__}")
-        if isinstance(xp, dict):
-            print(f"xpts gameweek keys: {sorted(xp.keys())}")
-            for gw, v in list(xp.items())[:1]:
-                print(f"  GW{gw} structure: {json.dumps(v)[:300] if isinstance(v, dict) else v}")
-        elif isinstance(xp, (int, float)):
-            print(f"  xpts is a single scalar: {xp} (only one GW exposed in listing)")
-        # Check for any other GW-related fields
-        gw_fields = [k for k in p.keys() if 'gw' in k.lower() or 'gameweek' in k.lower() or 'fixture' in k.lower()]
-        print(f"other GW/fixture fields: {gw_fields}")
+# Baseline
+data = fetch('https://fantalens.com/players?page=1')
+props = data.get('props') or {}
+print(f"season gameweeks available: {props.get('gameweeks')}")
+print(f"selectedGameweeks (default): {props.get('selectedGameweeks')}")
+print(f"pagination: {props.get('pagination')}")
+players = props.get('players') or []
+if players:
+    print(f"default xpts GWs: {sorted((players[0].get('xpts') or {}).keys())}")
+
+# Try requesting specific gameweeks via query params (common patterns)
+for qs in ['gameweeks=3,4,5', 'gameweeks[]=3&gameweeks[]=4', 'gw=4', 'gameweek=4', 'selectedGameweeks=3,4,5']:
+    try:
+        d = fetch(f'https://fantalens.com/players?page=1&{qs}')
+        p = (d.get('props') or {}).get('players') or []
+        if p:
+            gws = sorted((p[0].get('xpts') or {}).keys())
+            sel = (d.get('props') or {}).get('selectedGameweeks')
+            print(f"  ?{qs:40s} -> xpts GWs={gws} selectedGameweeks={sel}")
+    except Exception as e:
+        print(f"  ?{qs:40s} -> error {e}")
+
