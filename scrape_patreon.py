@@ -47,6 +47,14 @@ def supabase_get(path):
     return resp.json() if resp.status_code == 200 else []
 
 
+def supabase_delete(table, filters):
+    """Delete rows matching filters (dict of column -> value, exact match)."""
+    query = "&".join(f"{k}=eq.{quote(str(v))}" for k, v in filters.items())
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{query}"
+    resp = requests.delete(url, headers=HEADERS_SUPABASE, timeout=30)
+    return resp.status_code in (200, 204)
+
+
 def supabase_post(table, data, upsert_cols=None):
     headers = dict(HEADERS_SUPABASE)
     if upsert_cols:
@@ -163,6 +171,8 @@ def get_last_import_timestamp():
 
 def set_last_import_timestamp(published_at):
     """Store the published_at of the post we just imported."""
+    # Delete existing meta row then insert fresh (no constraint needed)
+    supabase_delete("csv_imports", {"season": "2026-27", "element_id": 0, "csv_team": "__patreon_meta__"})
     meta_row = [{
         'season': '2026-27',
         'gameweek': 0,
@@ -171,7 +181,7 @@ def set_last_import_timestamp(published_at):
         'csv_team': '__patreon_meta__',
         'position': 'META',
     }]
-    supabase_post("csv_imports", meta_row, "season,element_id,csv_team")
+    supabase_post("csv_imports", meta_row)
 
 
 def get_players_db():
@@ -297,13 +307,18 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
         })
 
     # Write to Supabase
+    write_ok = False
     if new_mappings:
         supabase_post("csv_name_mapping", new_mappings, "csv_name,csv_team,season")
 
     if imports:
-        supabase_post("csv_imports", imports, "season,gameweek,element_id")
+        # csv_imports: delete this GW's rows then insert fresh (no constraint needed)
+        supabase_delete("csv_imports", {"season": season, "gameweek": gameweek})
+        ok = supabase_post("csv_imports", imports)
+        if not ok:
+            print("  WARNING: csv_imports write failed (continuing to projection_inputs)")
 
-        # Also populate projection_inputs
+        # projection_inputs — this is what the app reads. Runs regardless of above.
         sources = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=id")
         if sources:
             source_id = sources[0]['id']
@@ -327,9 +342,14 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
                         'meta': json.dumps({'bcv': imp.get('bcv')}),
                     })
             if proj_rows:
-                supabase_post("projection_inputs", proj_rows, "source_id,element_id,season,gameweek,uploaded_for_gw")
+                pok = supabase_post("projection_inputs", proj_rows, "source_id,element_id,season,gameweek,uploaded_for_gw")
+                if pok:
+                    print(f"  projection_inputs: wrote {len(proj_rows)} rows")
+                    write_ok = True
+                else:
+                    print("  WARNING: projection_inputs write failed")
 
-    return matched, unmatched
+    return matched, unmatched, write_ok
 
 
 def should_check_now():
@@ -380,12 +400,16 @@ def main():
 
     print(f"  CSV downloaded: {len(csv_bytes)} bytes")
 
-    # Import (upserts — will overwrite previous values for same GW)
-    matched, unmatched = import_csv(csv_bytes, latest['gameweek'], published_at=latest['published_at'])
+    # Import
+    matched, unmatched, write_ok = import_csv(csv_bytes, latest['gameweek'], published_at=latest['published_at'])
     print(f"  Import complete: {matched} matched, {len(unmatched)} unmatched")
-    if matched > 0:
+    # Only mark this version as imported if the data actually landed in the DB.
+    # Otherwise we'll retry on the next run instead of silently skipping.
+    if matched > 0 and write_ok:
         set_last_import_timestamp(latest['published_at'])
         print(f"  Saved import timestamp: {latest['published_at']}")
+    elif matched > 0 and not write_ok:
+        print("  Data write failed — NOT saving timestamp, will retry next run")
     if unmatched:
         print(f"  Unmatched: {unmatched[:10]}")
         if len(unmatched) > 10:
