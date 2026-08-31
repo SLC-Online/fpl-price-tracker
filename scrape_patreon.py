@@ -164,38 +164,33 @@ def get_post_csv(post_id):
 def get_last_import_timestamp():
     """Get the published_at of the last Patreon post we imported.
 
-    Stored in the transfer_algorithm row of projection_sources.meta.
+    Stored appended to the transfer_algorithm row's description field as
+    a marker: "...|last_import=<iso timestamp>".
     """
-    rows = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=meta")
-    if rows and rows[0].get('meta'):
-        meta = rows[0]['meta']
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except (json.JSONDecodeError, TypeError):
-                return None
-        return meta.get('last_patreon_published_at') if isinstance(meta, dict) else None
+    rows = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=description")
+    if isinstance(rows, list) and rows and rows[0].get('description'):
+        desc = rows[0]['description']
+        if '|last_import=' in desc:
+            return desc.split('|last_import=', 1)[1].strip()
     return None
 
 
 def set_last_import_timestamp(published_at):
-    """Store the published_at of the post we just imported (in projection_sources.meta)."""
-    # Preserve any existing meta, just update the timestamp key
-    rows = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=id,meta")
-    if not rows:
-        return
-    meta = rows[0].get('meta') or {}
-    if isinstance(meta, str):
-        try:
-            meta = json.loads(meta)
-        except (json.JSONDecodeError, TypeError):
-            meta = {}
-    meta['last_patreon_published_at'] = published_at
+    """Store the published_at in the transfer_algorithm description field."""
+    rows = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=id,description")
+    if not (isinstance(rows, list) and rows):
+        return False
     source_id = rows[0]['id']
+    base_desc = (rows[0].get('description') or '').split('|last_import=', 1)[0].rstrip()
+    new_desc = f"{base_desc}|last_import={published_at}"
     headers = dict(HEADERS_SUPABASE)
     headers["Prefer"] = "return=minimal"
     url = f"{SUPABASE_URL}/rest/v1/projection_sources?id=eq.{source_id}"
-    requests.patch(url, headers=headers, json={'meta': meta}, timeout=15)
+    resp = requests.patch(url, headers=headers, json={'description': new_desc}, timeout=15)
+    if resp.status_code not in (200, 204):
+        print(f"  WARNING: could not save timestamp: {resp.status_code} - {resp.text[:150]}")
+        return False
+    return True
 
 
 def get_players_db():
