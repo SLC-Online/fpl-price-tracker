@@ -54,6 +54,39 @@ ALTER TABLE projection_inputs
     ADD CONSTRAINT projection_inputs_capture_unique
     UNIQUE (capture_id, element_id, gameweek);
 
+-- Backfill: wrap any existing (pre-capture) projection_inputs rows into a
+-- capture per (source_id, uploaded_for_gw) so nothing disappears from the app
+-- during the transition. Each existing (source, uploaded_for_gw) group becomes
+-- one "migrated" capture, and its rows get that capture_id.
+DO $$
+DECLARE
+    grp RECORD;
+    new_id BIGINT;
+BEGIN
+    FOR grp IN
+        SELECT source_id, season, uploaded_for_gw,
+               COUNT(*) AS rows, COUNT(DISTINCT element_id) AS players
+        FROM projection_inputs
+        WHERE capture_id IS NULL
+        GROUP BY source_id, season, uploaded_for_gw
+    LOOP
+        INSERT INTO projection_captures
+            (source_id, season, uploaded_for_gw, content_hash, row_count, player_count, meta)
+        VALUES
+            (grp.source_id, grp.season, grp.uploaded_for_gw,
+             'migrated-' || grp.source_id || '-' || grp.uploaded_for_gw,
+             grp.rows, grp.players, '{"migrated": true}'::jsonb)
+        RETURNING id INTO new_id;
+
+        UPDATE projection_inputs
+        SET capture_id = new_id
+        WHERE capture_id IS NULL
+          AND source_id = grp.source_id
+          AND season = grp.season
+          AND uploaded_for_gw = grp.uploaded_for_gw;
+    END LOOP;
+END $$;
+
 -- RLS for the new table (public read, service write — same as siblings)
 ALTER TABLE projection_captures ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Public read access" ON projection_captures;
