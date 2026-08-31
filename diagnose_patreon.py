@@ -12,16 +12,21 @@ HEADERS = {
     "Prefer": "return=minimal",
 }
 
-# Clear the stored timestamp in projection_sources.meta
-rows = requests.get(
+resp = requests.get(
     f"{SUPABASE_URL}/rest/v1/projection_sources?source_name=eq.transfer_algorithm&select=id,meta",
     headers=HEADERS, timeout=15
-).json()
-if rows:
+)
+print(f"GET status: {resp.status_code}")
+rows = resp.json()
+print(f"Response: {json.dumps(rows)[:300]}")
+
+if isinstance(rows, list) and rows:
     meta = rows[0].get('meta') or {}
     if isinstance(meta, str):
-        try: meta = json.loads(meta)
-        except: meta = {}
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
     meta.pop('last_patreon_published_at', None)
     sid = rows[0]['id']
     r = requests.patch(
@@ -30,4 +35,4 @@ if rows:
     )
     print(f"Cleared timestamp: {r.status_code}")
 else:
-    print("No transfer_algorithm source found")
+    print("Could not read projection_sources (see response above)")
