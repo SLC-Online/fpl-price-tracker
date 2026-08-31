@@ -21,17 +21,11 @@ rows = resp.json()
 print(f"Response: {json.dumps(rows)[:500]}")
 
 if isinstance(rows, list) and rows:
-    meta = rows[0].get('meta') or {}
-    if isinstance(meta, str):
-        try:
-            meta = json.loads(meta)
-        except Exception:
-            meta = {}
-    meta.pop('last_patreon_published_at', None)
     sid = rows[0]['id']
+    base_desc = (rows[0].get('description') or '').split('|last_import=', 1)[0].rstrip()
     r = requests.patch(
         f"{SUPABASE_URL}/rest/v1/projection_sources?id=eq.{sid}",
-        headers=HEADERS, json={'meta': meta}, timeout=15
+        headers=HEADERS, json={'description': base_desc}, timeout=15
     )
     print(f"Cleared timestamp: {r.status_code}")
 else:
