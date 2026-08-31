@@ -314,45 +314,12 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
 
 
 def should_check_now():
-    """Decide whether to run based on time-to-deadline and time of day.
-    
-    - 2am-9am UK: skip (nobody posts at 3am)
-    - Within 48h of next deadline: always check (every 15 min)
-    - More than 48h from deadline: check once per hour (skip if minute != 0)
+    """Always check. The check is one cheap API call — there's no reason to skip.
+
+    Previously this gated on time-to-deadline and time-of-day, but that caused
+    us to MISS posts the creator published outside those windows. The whole point
+    of checking frequently is to never miss an update, so we always run.
     """
-    now = datetime.now(timezone.utc)
-    uk_hour = (now.hour + 1) % 24  # UTC+1 for BST (summer)
-
-    # Skip 2am-9am UK time
-    if 2 <= uk_hour < 9:
-        print(f"  Off-peak hours ({uk_hour}:xx UK). Skipping.")
-        return False
-
-    # Check how far we are from the next deadline
-    try:
-        resp = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/", timeout=10)
-        if resp.status_code == 200:
-            events = resp.json().get('events', [])
-            for event in events:
-                if event.get('is_next'):
-                    deadline = datetime.fromisoformat(event['deadline_time'].replace('Z', '+00:00'))
-                    hours_to_deadline = (deadline - now).total_seconds() / 3600
-                    print(f"  Next deadline: {deadline.isoformat()} ({hours_to_deadline:.1f}h away)")
-
-                    if hours_to_deadline <= 48:
-                        # Close to deadline — check every time (every 15 min)
-                        return True
-                    else:
-                        # Far from deadline — only check on the hour
-                        if now.minute < 15:
-                            return True
-                        else:
-                            print(f"  >48h from deadline, not on the hour. Skipping.")
-                            return False
-    except Exception as e:
-        print(f"  Could not fetch deadline info: {e}. Proceeding anyway.")
-
-    # Default: check
     return True
 
 
