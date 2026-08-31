@@ -178,78 +178,97 @@ def get_or_create_source(source_name, description):
     return resp.json()[0]['id']
 
 
+def _fetch_fantalens_page(gw, page):
+    """Fetch one page of FantaLens players for a specific gameweek."""
+    resp = requests.get(
+        f"https://fantalens.com/players?gw={gw}&page={page}",
+        timeout=15, headers={'User-Agent': 'Mozilla/5.0'}
+    )
+    scripts = re.findall(
+        r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
+        resp.text, re.DOTALL
+    )
+    if not scripts:
+        return None
+    return json.loads(scripts[0])
+
+
 def scrape_fantalens(gameweek):
-    """Scrape FantaLens projected points for all players."""
-    print(f"  Scraping FantaLens...")
-    all_players = []
-    page = 1
-    while True:
-        try:
-            resp = requests.get(
-                f"https://fantalens.com/players?page={page}",
-                timeout=15, headers={'User-Agent': 'Mozilla/5.0'}
-            )
-            scripts = re.findall(
-                r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
-                resp.text, re.DOTALL
-            )
-            if not scripts:
-                break
-            data = json.loads(scripts[0])
-            props = data.get('props') or {}
-            players = props.get('players') or []
-            if not players:
-                break
-            all_players.extend(players)
-            if len(players) < 25:
-                break
-            page += 1
-            time.sleep(0.5)  # Be polite
-        except Exception as e:
-            print(f"    Page {page} error: {e}")
-            break
+    """Scrape FantaLens projected points for the next several gameweeks.
 
-    print(f"    Got {len(all_players)} players")
-
-    # Extract projections
+    The /players listing only exposes one gameweek at a time (its xpts field),
+    but accepts a ?gw=N param, so we loop GW..GW+7 and combine. This gives
+    multi-week coverage comparable to FPL Form.
+    """
+    print(f"  Scraping FantaLens (GW{gameweek}..{min(gameweek + 7, 38)})...")
     projections = []
-    for p in all_players:
-        element_id = p.get('external_id')
-        if not element_id:
-            continue
-        xpts_data = p.get('xpts') or {}
-        for gw_str, gw_data in xpts_data.items():
+
+    for gw in range(gameweek, min(gameweek + 7, 38) + 1):
+        page = 1
+        gw_rows = 0
+        while True:
             try:
-                gw_num = int(gw_str)
-            except (ValueError, TypeError):
-                continue
-            if isinstance(gw_data, dict):
-                total = gw_data.get('total')
-                if total is not None:
-                    meta = {}
-                    # Extract rich breakdown if available
+                data = _fetch_fantalens_page(gw, page)
+                if not data:
+                    break
+                props = data.get('props') or {}
+                players = props.get('players') or []
+                if not players:
+                    break
+
+                for p in players:
+                    element_id = p.get('external_id')
+                    if not element_id:
+                        continue
+                    xpts_data = p.get('xpts') or {}
+                    gw_data = xpts_data.get(str(gw))
+                    if not isinstance(gw_data, dict):
+                        continue
                     fixtures = gw_data.get('fixtures') or []
-                    if fixtures and isinstance(fixtures[0], dict):
-                        fx = fixtures[0]
-                        quantities = fx.get('quantities') or {}
-                        meta = {
-                            'start_prob': fx.get('start_prob'),
-                            'expected_minutes': fx.get('expected_minutes'),
-                            'proj_goals': quantities.get('goals'),
-                            'proj_assists': quantities.get('assists'),
-                            'cs_prob': quantities.get('clean_sheet_team'),
-                            'opponent': fx.get('opponent'),
-                            'is_home': fx.get('is_home'),
-                            'difficulty': fx.get('difficulty'),
-                        }
+                    # Sum xpts across all fixtures this player has in the GW
+                    # (usually 1, but 2 in a double gameweek).
+                    total = 0.0
+                    have = False
+                    meta_fx = None
+                    for fx in fixtures:
+                        if not isinstance(fx, dict):
+                            continue
+                        fx_xpts = fx.get('xpts')
+                        if fx_xpts is None:
+                            continue
+                        total += float(fx_xpts)
+                        have = True
+                        if meta_fx is None:
+                            bd = fx.get('breakdown') or {}
+                            meta_fx = {
+                                'opponent': fx.get('opponent'),
+                                'is_home': fx.get('is_home'),
+                                'difficulty': fx.get('difficulty'),
+                                'win_prob': fx.get('win'),
+                                'proj_goals': bd.get('goals'),
+                                'proj_assists': bd.get('assists'),
+                                'proj_bonus': bd.get('bonus'),
+                            }
+                    if not have:
+                        continue
                     projections.append({
                         'element_id': element_id,
-                        'gameweek': gw_num,
-                        'expected_points': total,
-                        'meta': meta,
+                        'gameweek': gw,
+                        'expected_points': round(total, 2),
+                        'meta': meta_fx or {},
                     })
+                    gw_rows += 1
 
-    print(f"    Extracted {len(projections)} projection rows")
+                if len(players) < 25:
+                    break
+                page += 1
+                time.sleep(0.4)
+            except Exception as e:
+                print(f"    GW{gw} page {page} error: {e}")
+                break
+        print(f"    GW{gw}: {gw_rows} players")
+
+    print(f"    Extracted {len(projections)} projection rows across gameweeks")
     return projections
 
 
