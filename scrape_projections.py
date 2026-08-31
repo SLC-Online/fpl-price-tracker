@@ -46,6 +46,99 @@ def supabase_post(table, data, upsert_cols=None):
     return True
 
 
+def content_hash(projections):
+    """Deterministic hash of a projection set for dedup.
+
+    Two captures with identical (element_id, gameweek, expected_points) sets
+    produce the same hash, so we skip storing an unchanged re-scrape.
+    """
+    import hashlib
+    items = sorted(
+        (int(p['element_id']), int(p['gameweek']), round(float(p['expected_points']), 3))
+        for p in projections
+        if p.get('element_id') is not None and p.get('expected_points') is not None
+    )
+    payload = ';'.join(f"{e}:{g}:{v}" for e, g, v in items)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def get_latest_capture_hash(source_id, uploaded_for_gw, season='2026-27'):
+    """Return the content_hash of the most recent capture for this source+GW, or None."""
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/projection_captures"
+        f"?source_id=eq.{source_id}&uploaded_for_gw=eq.{uploaded_for_gw}"
+        f"&season=eq.{quote(season)}&select=content_hash&order=captured_at.desc&limit=1",
+        headers=HEADERS, timeout=15
+    )
+    if resp.status_code == 200:
+        rows = resp.json()
+        if rows:
+            return rows[0].get('content_hash')
+    return None
+
+
+def create_capture(source_id, uploaded_for_gw, chash, row_count, player_count, season='2026-27', meta=None):
+    """Insert a new capture row and return its id."""
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/projection_captures",
+        headers={**HEADERS, "Prefer": "return=representation"},
+        json={
+            'source_id': source_id,
+            'season': season,
+            'uploaded_for_gw': uploaded_for_gw,
+            'content_hash': chash,
+            'row_count': row_count,
+            'player_count': player_count,
+            'meta': json.dumps(meta or {}),
+        },
+        timeout=15
+    )
+    if resp.status_code in (200, 201):
+        return resp.json()[0]['id']
+    print(f"  ERROR creating capture: {resp.status_code} - {resp.text[:200]}")
+    return None
+
+
+def store_projection_snapshot(source_id, uploaded_for_gw, projections, valid_ids, season='2026-27', meta=None):
+    """Store a projection set as a new capture, but only if it differs from the
+    most recent capture for this source+GW. Returns (written_rows, skipped_unknown, was_new).
+    """
+    # Filter to players we know about (avoid FK violations)
+    filtered = [p for p in projections if p['element_id'] in valid_ids]
+    skipped = len(projections) - len(filtered)
+    if not filtered:
+        return 0, skipped, False
+
+    chash = content_hash(filtered)
+    prev_hash = get_latest_capture_hash(source_id, uploaded_for_gw, season)
+    if prev_hash == chash:
+        print(f"    Unchanged since last capture (hash {chash[:12]}) — skipping")
+        return 0, skipped, False
+
+    player_count = len({p['element_id'] for p in filtered})
+    capture_id = create_capture(source_id, uploaded_for_gw, chash, len(filtered), player_count, season, meta)
+    if not capture_id:
+        return 0, skipped, False
+
+    rows = [{
+        'capture_id': capture_id,
+        'source_id': source_id,
+        'element_id': p['element_id'],
+        'season': season,
+        'gameweek': p['gameweek'],
+        'uploaded_for_gw': uploaded_for_gw,
+        'expected_points': p['expected_points'],
+        'meta': json.dumps(p.get('meta', {})),
+    } for p in filtered]
+
+    written = 0
+    for i in range(0, len(rows), 200):
+        if supabase_post("projection_inputs", rows[i:i+200]):
+            written += len(rows[i:i+200])
+        time.sleep(0.2)
+    return written, skipped, True
+
+
 def get_next_deadline():
     """Get the next GW deadline from the FPL API."""
     resp = requests.get(f"{FPL_BASE}/bootstrap-static/", timeout=15)
@@ -282,27 +375,13 @@ def main():
 
     fl_written = 0
     if fl_projections:
-        skipped = sum(1 for p in fl_projections if p['element_id'] not in valid_ids)
-        rows = [{
-            'source_id': fl_source_id,
-            'element_id': p['element_id'],
-            'season': '2026-27',
-            'gameweek': p['gameweek'],
-            'uploaded_for_gw': next_gw,
-            'expected_points': p['expected_points'],
-            'meta': json.dumps(p.get('meta', {})),
-        } for p in fl_projections if p['element_id'] in valid_ids]
-
+        print(f"  FantaLens: {len(fl_projections)} rows scraped")
+        written, skipped, was_new = store_projection_snapshot(
+            fl_source_id, next_gw, fl_projections, valid_ids)
+        fl_written = written
         if skipped:
-            print(f"  Skipped {skipped} FantaLens rows with unknown element_ids")
-        print(f"  Writing {len(rows)} FantaLens projections to Supabase...")
-        for i in range(0, len(rows), 200):
-            if supabase_post("projection_inputs", rows[i:i+200],
-                             "source_id,element_id,season,gameweek,uploaded_for_gw"):
-                fl_written += len(rows[i:i+200])
-            else:
-                had_error = True
-            time.sleep(0.3)
+            print(f"    Skipped {skipped} rows with unknown element_ids")
+        print(f"    {'New capture: ' + str(written) + ' rows written' if was_new else 'No new capture stored'}")
 
     # --- Scrape FPL Form ---
     try:
@@ -314,35 +393,20 @@ def main():
 
     ff_written = 0
     if ff_projections:
-        skipped = sum(1 for p in ff_projections if p['element_id'] not in valid_ids)
-        rows = [{
-            'source_id': ff_source_id,
-            'element_id': p['element_id'],
-            'season': '2026-27',
-            'gameweek': p['gameweek'],
-            'uploaded_for_gw': next_gw,
-            'expected_points': p['expected_points'],
-            'meta': json.dumps(p.get('meta', {})),
-        } for p in ff_projections if p['element_id'] in valid_ids]
-
+        print(f"  FPL Form: {len(ff_projections)} rows scraped")
+        written, skipped, was_new = store_projection_snapshot(
+            ff_source_id, next_gw, ff_projections, valid_ids)
+        ff_written = written
         if skipped:
-            print(f"  Skipped {skipped} FPL Form rows with unknown element_ids")
-        print(f"  Writing {len(rows)} FPL Form projections to Supabase...")
-        for i in range(0, len(rows), 200):
-            if supabase_post("projection_inputs", rows[i:i+200],
-                             "source_id,element_id,season,gameweek,uploaded_for_gw"):
-                ff_written += len(rows[i:i+200])
-            else:
-                had_error = True
-            time.sleep(0.3)
+            print(f"    Skipped {skipped} rows with unknown element_ids")
+        print(f"    {'New capture: ' + str(written) + ' rows written' if was_new else 'No new capture stored'}")
 
     # Summary
-    print(f"\n  Done. FantaLens: {fl_written} rows written, FPL Form: {ff_written} rows written")
+    print(f"\n  Done. FantaLens: {fl_written} rows, FPL Form: {ff_written} rows")
     if is_pre_deadline:
         print(f"  Tagged as pre-deadline snapshot for GW{next_gw}")
 
-    # Fail the job if a scrape crashed or a write errored — so we get notified
-    # (but only after doing as much as possible first).
+    # Fail the job if a scrape crashed — so we get notified.
     if had_error:
         print("  One or more steps had errors (see above).")
         raise SystemExit(1)

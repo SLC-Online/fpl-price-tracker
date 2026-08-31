@@ -74,6 +74,59 @@ def supabase_post(table, data, upsert_cols=None):
     return True
 
 
+def projection_content_hash(proj_rows):
+    """Deterministic hash of a projection set for dedup."""
+    import hashlib
+    items = sorted(
+        (int(r['element_id']), int(r['gameweek']), round(float(r['expected_points']), 3))
+        for r in proj_rows
+        if r.get('element_id') is not None and r.get('expected_points') is not None
+    )
+    payload = ';'.join(f"{e}:{g}:{v}" for e, g, v in items)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def store_projection_capture(source_id, uploaded_for_gw, proj_rows, season='2026-27', meta=None):
+    """Store projections as a new capture — but only if the content differs from
+    the most recent capture for this source+GW. Returns (written, was_new)."""
+    if not proj_rows:
+        return 0, False
+
+    chash = projection_content_hash(proj_rows)
+
+    # Compare with latest capture's hash
+    prev = supabase_get(
+        f"projection_captures?source_id=eq.{source_id}&uploaded_for_gw=eq.{uploaded_for_gw}"
+        f"&season=eq.{season}&select=content_hash&order=captured_at.desc&limit=1"
+    )
+    if isinstance(prev, list) and prev and prev[0].get('content_hash') == chash:
+        print(f"  Projections unchanged since last capture — skipping")
+        return 0, False
+
+    # Create the capture
+    player_count = len({r['element_id'] for r in proj_rows})
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/projection_captures",
+        headers={**HEADERS_SUPABASE, "Prefer": "return=representation"},
+        json={
+            'source_id': source_id, 'season': season, 'uploaded_for_gw': uploaded_for_gw,
+            'content_hash': chash, 'row_count': len(proj_rows), 'player_count': player_count,
+            'meta': json.dumps(meta or {}),
+        },
+        timeout=15
+    )
+    if resp.status_code not in (200, 201):
+        print(f"  ERROR creating capture: {resp.status_code} - {resp.text[:200]}")
+        return 0, False
+    capture_id = resp.json()[0]['id']
+
+    rows = [{**r, 'capture_id': capture_id} for r in proj_rows]
+    ok = supabase_post("projection_inputs", rows)
+    if ok:
+        return len(rows), True
+    return 0, False
+
+
 def get_latest_post():
     """Check Patreon for the latest Transfer Algorithm post."""
     url = f"https://www.patreon.com/api/posts?filter[campaign_id]={CAMPAIGN_ID}&filter[is_draft]=false&sort=-published_at&page[count]=5"
@@ -327,6 +380,8 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
             print("  WARNING: csv_imports write failed (continuing to projection_inputs)")
 
         # projection_inputs — this is what the app reads. Runs regardless of above.
+        # Stored as a deduplicated capture: only creates a new capture if the
+        # projection values differ from the most recent one for this GW.
         sources = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=id")
         if sources:
             source_id = sources[0]['id']
@@ -350,12 +405,15 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
                         'meta': json.dumps({'bcv': imp.get('bcv')}),
                     })
             if proj_rows:
-                pok = supabase_post("projection_inputs", proj_rows, "source_id,element_id,season,gameweek,uploaded_for_gw")
-                if pok:
-                    print(f"  projection_inputs: wrote {len(proj_rows)} rows")
+                written, was_new = store_projection_capture(
+                    source_id, gameweek, proj_rows, season,
+                    meta={'patreon_published_at': published_at} if published_at else None)
+                if was_new:
+                    print(f"  projection_inputs: new capture, {written} rows")
                     write_ok = True
                 else:
-                    print("  WARNING: projection_inputs write failed")
+                    print("  projection_inputs: no new capture (unchanged)")
+                    write_ok = True  # unchanged is still a successful outcome
 
     return matched, unmatched, write_ok
 
