@@ -28,3 +28,19 @@ data/fpl_database.db
 
 # Keep the tracker DB (this IS the cloud backup)
 !data/fpl_tracker.db
+
+# Local analysis artifacts / scratch work — not part of the scraper deployment
+data/extracted/
+data/squads/
+data/*.json
+data/*.db
+external_data/
+DATA_MAPPING.md
+DECISION_VARIABLES.md
+FINDINGS.md
+MODEL_REPORT.md
+PLAN.md
+STATUS.md
+decision_rules.md
+engine_ai_prompt.md
+supabase/
