@@ -52,7 +52,10 @@ def supabase_delete(table, filters):
     query = "&".join(f"{k}=eq.{quote(str(v))}" for k, v in filters.items())
     url = f"{SUPABASE_URL}/rest/v1/{table}?{query}"
     resp = requests.delete(url, headers=HEADERS_SUPABASE, timeout=30)
-    return resp.status_code in (200, 204)
+    if resp.status_code not in (200, 204):
+        print(f"  DELETE {table} failed: {resp.status_code} - {resp.text[:150]}")
+        return False
+    return True
 
 
 def supabase_post(table, data, upsert_cols=None):
@@ -160,28 +163,39 @@ def get_post_csv(post_id):
 
 def get_last_import_timestamp():
     """Get the published_at of the last Patreon post we imported.
-    
-    Stores tracking info in a special row in csv_imports with element_id=0.
+
+    Stored in the transfer_algorithm row of projection_sources.meta.
     """
-    rows = supabase_get("csv_imports?select=csv_name&season=eq.2026-27&element_id=eq.0&csv_team=eq.__patreon_meta__&limit=1")
-    if rows and rows[0].get('csv_name'):
-        return rows[0]['csv_name']  # We store published_at in csv_name for the meta row
+    rows = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=meta")
+    if rows and rows[0].get('meta'):
+        meta = rows[0]['meta']
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return meta.get('last_patreon_published_at') if isinstance(meta, dict) else None
     return None
 
 
 def set_last_import_timestamp(published_at):
-    """Store the published_at of the post we just imported."""
-    # Delete existing meta row then insert fresh (no constraint needed)
-    supabase_delete("csv_imports", {"season": "2026-27", "element_id": 0, "csv_team": "__patreon_meta__"})
-    meta_row = [{
-        'season': '2026-27',
-        'gameweek': 0,
-        'element_id': 0,
-        'csv_name': published_at,
-        'csv_team': '__patreon_meta__',
-        'position': 'META',
-    }]
-    supabase_post("csv_imports", meta_row)
+    """Store the published_at of the post we just imported (in projection_sources.meta)."""
+    # Preserve any existing meta, just update the timestamp key
+    rows = supabase_get("projection_sources?source_name=eq.transfer_algorithm&select=id,meta")
+    if not rows:
+        return
+    meta = rows[0].get('meta') or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    meta['last_patreon_published_at'] = published_at
+    source_id = rows[0]['id']
+    headers = dict(HEADERS_SUPABASE)
+    headers["Prefer"] = "return=minimal"
+    url = f"{SUPABASE_URL}/rest/v1/projection_sources?id=eq.{source_id}"
+    requests.patch(url, headers=headers, json={'meta': meta}, timeout=15)
 
 
 def get_players_db():
@@ -312,7 +326,9 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
         supabase_post("csv_name_mapping", new_mappings, "csv_name,csv_team,season")
 
     if imports:
-        # csv_imports: delete this GW's rows then insert fresh (no constraint needed)
+        # csv_imports: delete this GW's rows, then insert fresh.
+        # (Avoids ON CONFLICT ambiguity — constraint is a unique index, not a
+        #  named constraint, so PostgREST on_conflict is unreliable here.)
         supabase_delete("csv_imports", {"season": season, "gameweek": gameweek})
         ok = supabase_post("csv_imports", imports)
         if not ok:
