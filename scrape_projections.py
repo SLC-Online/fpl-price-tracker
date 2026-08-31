@@ -103,7 +103,8 @@ def scrape_fantalens(gameweek):
             if not scripts:
                 break
             data = json.loads(scripts[0])
-            players = data.get('props', {}).get('players', [])
+            props = data.get('props') or {}
+            players = props.get('players') or []
             if not players:
                 break
             all_players.extend(players)
@@ -123,26 +124,27 @@ def scrape_fantalens(gameweek):
         element_id = p.get('external_id')
         if not element_id:
             continue
-        xpts_data = p.get('xpts', {})
+        xpts_data = p.get('xpts') or {}
         for gw_str, gw_data in xpts_data.items():
             try:
                 gw_num = int(gw_str)
-            except:
+            except (ValueError, TypeError):
                 continue
             if isinstance(gw_data, dict):
                 total = gw_data.get('total')
                 if total is not None:
                     meta = {}
                     # Extract rich breakdown if available
-                    fixtures = gw_data.get('fixtures', [])
-                    if fixtures:
+                    fixtures = gw_data.get('fixtures') or []
+                    if fixtures and isinstance(fixtures[0], dict):
                         fx = fixtures[0]
+                        quantities = fx.get('quantities') or {}
                         meta = {
                             'start_prob': fx.get('start_prob'),
                             'expected_minutes': fx.get('expected_minutes'),
-                            'proj_goals': fx.get('quantities', {}).get('goals'),
-                            'proj_assists': fx.get('quantities', {}).get('assists'),
-                            'cs_prob': fx.get('quantities', {}).get('clean_sheet_team'),
+                            'proj_goals': quantities.get('goals'),
+                            'proj_assists': quantities.get('assists'),
+                            'cs_prob': quantities.get('clean_sheet_team'),
                             'opponent': fx.get('opponent'),
                             'is_home': fx.get('is_home'),
                             'difficulty': fx.get('difficulty'),
@@ -212,19 +214,42 @@ def scrape_fplform(gameweek):
         return []
 
 
+def get_valid_element_ids():
+    """Fetch the set of element_ids that exist in our players table.
+    Projections referencing unknown IDs must be filtered out, otherwise the
+    whole batch is rejected by the foreign-key constraint."""
+    ids = set()
+    offset = 0
+    while True:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/players?select=element_id&limit=1000&offset={offset}",
+            headers=HEADERS, timeout=15
+        )
+        if resp.status_code != 200:
+            break
+        rows = resp.json()
+        if not rows:
+            break
+        ids.update(r['element_id'] for r in rows)
+        if len(rows) < 1000:
+            break
+        offset += 1000
+    return ids
+
+
 def main():
     now = datetime.now(timezone.utc)
     print(f"[{now.isoformat()}] Projection scraper starting")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("  ERROR: No Supabase credentials")
-        return
+        raise SystemExit(1)
 
     # Get next deadline info
     deadline_info = get_next_deadline()
     if not deadline_info:
         print("  ERROR: Could not determine next deadline")
-        return
+        raise SystemExit(1)
 
     next_gw = deadline_info['gameweek']
     deadline = deadline_info['deadline']
@@ -237,13 +262,27 @@ def main():
     if is_pre_deadline:
         print(f"  *** PRE-DEADLINE SNAPSHOT ***")
 
+    # Valid element IDs (to filter out players not in our DB)
+    valid_ids = get_valid_element_ids()
+    print(f"  {len(valid_ids)} valid player IDs in DB")
+
     # Get/create sources
     fl_source_id = get_or_create_source('fantalens', 'FantaLens.com - per-fixture projections with start probability and breakdown')
     ff_source_id = get_or_create_source('fpl_form', 'FPLForm.com - predicted points per fixture')
 
-    # Scrape FantaLens
-    fl_projections = scrape_fantalens(next_gw)
+    had_error = False
+
+    # --- Scrape FantaLens ---
+    try:
+        fl_projections = scrape_fantalens(next_gw)
+    except Exception as e:
+        print(f"  FantaLens scrape failed: {e}")
+        fl_projections = []
+        had_error = True
+
+    fl_written = 0
     if fl_projections:
+        skipped = sum(1 for p in fl_projections if p['element_id'] not in valid_ids)
         rows = [{
             'source_id': fl_source_id,
             'element_id': p['element_id'],
@@ -252,18 +291,30 @@ def main():
             'uploaded_for_gw': next_gw,
             'expected_points': p['expected_points'],
             'meta': json.dumps(p.get('meta', {})),
-        } for p in fl_projections]
+        } for p in fl_projections if p['element_id'] in valid_ids]
 
+        if skipped:
+            print(f"  Skipped {skipped} FantaLens rows with unknown element_ids")
         print(f"  Writing {len(rows)} FantaLens projections to Supabase...")
-        # Batch in chunks of 80 (80 × ~3 GWs = 240 rows, under 1000)
         for i in range(0, len(rows), 200):
-            supabase_post("projection_inputs", rows[i:i+200],
-                         "source_id,element_id,season,gameweek,uploaded_for_gw")
+            if supabase_post("projection_inputs", rows[i:i+200],
+                             "source_id,element_id,season,gameweek,uploaded_for_gw"):
+                fl_written += len(rows[i:i+200])
+            else:
+                had_error = True
             time.sleep(0.3)
 
-    # Scrape FPL Form
-    ff_projections = scrape_fplform(next_gw)
+    # --- Scrape FPL Form ---
+    try:
+        ff_projections = scrape_fplform(next_gw)
+    except Exception as e:
+        print(f"  FPL Form scrape failed: {e}")
+        ff_projections = []
+        had_error = True
+
+    ff_written = 0
     if ff_projections:
+        skipped = sum(1 for p in ff_projections if p['element_id'] not in valid_ids)
         rows = [{
             'source_id': ff_source_id,
             'element_id': p['element_id'],
@@ -272,18 +323,29 @@ def main():
             'uploaded_for_gw': next_gw,
             'expected_points': p['expected_points'],
             'meta': json.dumps(p.get('meta', {})),
-        } for p in ff_projections]
+        } for p in ff_projections if p['element_id'] in valid_ids]
 
+        if skipped:
+            print(f"  Skipped {skipped} FPL Form rows with unknown element_ids")
         print(f"  Writing {len(rows)} FPL Form projections to Supabase...")
         for i in range(0, len(rows), 200):
-            supabase_post("projection_inputs", rows[i:i+200],
-                         "source_id,element_id,season,gameweek,uploaded_for_gw")
+            if supabase_post("projection_inputs", rows[i:i+200],
+                             "source_id,element_id,season,gameweek,uploaded_for_gw"):
+                ff_written += len(rows[i:i+200])
+            else:
+                had_error = True
             time.sleep(0.3)
 
     # Summary
-    print(f"\n  Done. FantaLens: {len(fl_projections)} rows, FPL Form: {len(ff_projections)} rows")
+    print(f"\n  Done. FantaLens: {fl_written} rows written, FPL Form: {ff_written} rows written")
     if is_pre_deadline:
         print(f"  Tagged as pre-deadline snapshot for GW{next_gw}")
+
+    # Fail the job if a scrape crashed or a write errored — so we get notified
+    # (but only after doing as much as possible first).
+    if had_error:
+        print("  One or more steps had errors (see above).")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
