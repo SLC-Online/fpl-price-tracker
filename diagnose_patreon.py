@@ -13,12 +13,12 @@ HEADERS = {
 }
 
 resp = requests.get(
-    f"{SUPABASE_URL}/rest/v1/projection_sources?source_name=eq.transfer_algorithm&select=id,meta",
+    f"{SUPABASE_URL}/rest/v1/projection_sources?source_name=eq.transfer_algorithm&select=*",
     headers=HEADERS, timeout=15
 )
 print(f"GET status: {resp.status_code}")
 rows = resp.json()
-print(f"Response: {json.dumps(rows)[:300]}")
+print(f"Response: {json.dumps(rows)[:500]}")
 
 if isinstance(rows, list) and rows:
     meta = rows[0].get('meta') or {}
