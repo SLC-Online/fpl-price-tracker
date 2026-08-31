@@ -141,7 +141,17 @@ def store_projection_capture(source_id, uploaded_for_gw, proj_rows, season='2026
     ok = supabase_post("projection_inputs", rows)
     if ok:
         return len(rows), True
+    # Roll back the empty/partial capture so final_projections never points at it
+    supabase_delete_capture(capture_id)
     return 0, False
+
+
+def supabase_delete_capture(capture_id):
+    """Delete a capture and its rows (used to roll back a failed insert)."""
+    h = dict(HEADERS_SUPABASE)
+    h["Prefer"] = "return=minimal"
+    requests.delete(f"{SUPABASE_URL}/rest/v1/projection_inputs?capture_id=eq.{capture_id}", headers=h, timeout=30)
+    requests.delete(f"{SUPABASE_URL}/rest/v1/projection_captures?id=eq.{capture_id}", headers=h, timeout=15)
 
 
 def get_latest_post():
@@ -404,6 +414,22 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
             'gw1': gw_proj[0], 'gw2': gw_proj[1], 'gw3': gw_proj[2], 'gw4': gw_proj[3],
             'gw5': gw_proj[4], 'gw6': gw_proj[5], 'gw7': gw_proj[6], 'gw8': gw_proj[7],
         })
+
+    # Dedupe: two CSV names can fuzzy-match to the same element_id, which would
+    # violate the unique constraints. Keep the first occurrence per element_id.
+    seen_ids = set()
+    deduped = []
+    dup_count = 0
+    for imp in imports:
+        if imp['element_id'] in seen_ids:
+            dup_count += 1
+            continue
+        seen_ids.add(imp['element_id'])
+        deduped.append(imp)
+    if dup_count:
+        print(f"  Deduped {dup_count} rows mapping to an already-matched player")
+    imports = deduped
+    matched = len(imports)
 
     # Write to Supabase
     write_ok = False
