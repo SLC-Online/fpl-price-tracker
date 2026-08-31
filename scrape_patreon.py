@@ -75,14 +75,31 @@ def supabase_post(table, data, upsert_cols=None):
 
 
 def projection_content_hash(proj_rows):
-    """Deterministic hash of a projection set for dedup."""
+    """Deterministic hash of a projection set for dedup.
+
+    Includes bcv so that a change in the value figure (even with identical
+    expected points) produces a new capture.
+    """
     import hashlib
+
+    def bcv_of(r):
+        m = r.get('meta')
+        if isinstance(m, str):
+            try:
+                m = json.loads(m)
+            except (json.JSONDecodeError, TypeError):
+                m = {}
+        if isinstance(m, dict) and m.get('bcv') is not None:
+            return round(float(m['bcv']), 4)
+        return None
+
     items = sorted(
-        (int(r['element_id']), int(r['gameweek']), round(float(r['expected_points']), 3))
+        (int(r['element_id']), int(r['gameweek']),
+         round(float(r['expected_points']), 3), bcv_of(r))
         for r in proj_rows
         if r.get('element_id') is not None and r.get('expected_points') is not None
     )
-    payload = ';'.join(f"{e}:{g}:{v}" for e, g, v in items)
+    payload = ';'.join(f"{e}:{g}:{v}:{b}" for e, g, v, b in items)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
