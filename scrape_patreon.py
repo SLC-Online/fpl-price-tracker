@@ -326,11 +326,8 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
         supabase_post("csv_name_mapping", new_mappings, "csv_name,csv_team,season")
 
     if imports:
-        # csv_imports: delete this GW's rows, then insert fresh.
-        # (Avoids ON CONFLICT ambiguity — constraint is a unique index, not a
-        #  named constraint, so PostgREST on_conflict is unreliable here.)
-        supabase_delete("csv_imports", {"season": season, "gameweek": gameweek})
-        ok = supabase_post("csv_imports", imports)
+        # csv_imports: upsert on the same constraint the admin importer uses successfully
+        ok = supabase_post("csv_imports", imports, "season,gameweek,element_id")
         if not ok:
             print("  WARNING: csv_imports write failed (continuing to projection_inputs)")
 
