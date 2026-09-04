@@ -160,21 +160,34 @@ def selling_price(purchase, current):
 
 
 def compute_free_transfers(manager_id, next_gw, chips):
-    """Simulate FT accumulation up to (but not into) next_gw, then bank +1 for it.
-    Rules 2024-25+: start GW1 with 1, +1 each GW capped at 5, minus transfers
-    made that GW; wildcard/free-hit GWs don't consume FTs."""
+    """Free transfers available going into next_gw.
+
+    There is no transfer at GW1 — you just pick your initial squad, so FTs only
+    begin to exist from GW2. You get 1 free transfer at GW2, and each subsequent
+    gameweek you bank +1 (capped at 5), minus any transfers already made that GW.
+    Wildcard/Free-Hit gameweeks don't consume banked FTs.
+    """
+    if next_gw <= 1:
+        return 0
     transfers = fpl_get(f"entry/{manager_id}/transfers/")
     by_gw = {}
     for t in transfers:
         by_gw[t["event"]] = by_gw.get(t["event"], 0) + 1
     chip_gw = {c["event"]: c["name"] for c in chips if c.get("name") in ("wildcard", "freehit")}
-    ft = 1
-    for gw in range(2, next_gw):
+
+    ft = 1  # GW2 is the first gameweek a free transfer exists
+    # simulate completed gameweeks GW2 .. next_gw-1
+    for gw in range(3, next_gw):
         ft = min(5, ft + 1)
         if gw in chip_gw:
             continue
         ft = max(0, ft - by_gw.get(gw, 0))
-    ft = min(5, ft + 1)
+    # account for any transfers already made in GW2 (the seed week)
+    if 2 < next_gw:
+        ft = max(0, ft - by_gw.get(2, 0)) if 2 not in chip_gw else ft
+    # bank the +1 for next_gw itself (unless next_gw is GW2, already seeded)
+    if next_gw > 2:
+        ft = min(5, ft + 1)
     return ft
 
 
@@ -288,35 +301,58 @@ def load_players(url, key, bootstrap, next_gw, horizon):
 
 
 # ----------------------------------------------------------------------------
-# Scoring engine — optimal XI per GW with rotation, decayed over the horizon
+# Scoring engine — optimal valid XI + captain per GW, decayed over the horizon
 # ----------------------------------------------------------------------------
-def best_xi_points(squad_players, gw):
-    """Best legal XI points for one gameweek from a 15-man squad."""
+# All valid outfield formations (DEF, MID, FWD) with exactly 10 outfield + 1 GK.
+VALID_FORMATIONS = [
+    (d, m, f)
+    for d in range(3, 6)      # 3-5 DEF
+    for m in range(2, 6)      # 2-5 MID
+    for f in range(1, 4)      # 1-3 FWD
+    if d + m + f == 10
+]
+
+
+def best_xi_detail(squad_players, gw):
+    """Like best_xi_points but returns the full breakdown for one gameweek:
+    (total, formation, starters, captain, bench).
+    starters/bench are Player objects; captain is the doubled Player.
+    """
+    playing = [(p, p.projections.get(gw, 0.0)) for p in squad_players]
     by_pos = {1: [], 2: [], 3: [], 4: []}
-    for p in squad_players:
-        by_pos[p.element_type].append(p.projections.get(gw, 0.0))
+    for p, v in playing:
+        by_pos[p.element_type].append((p, v))
     for pos in by_pos:
-        by_pos[pos].sort(reverse=True)
+        by_pos[pos].sort(key=lambda x: x[1], reverse=True)
 
-    # start with the minimum required at each position
-    total = 0.0
-    used = {}
-    for pos, need in FORMATION_MIN.items():
-        picks = by_pos[pos][:need]
-        total += sum(picks)
-        used[pos] = need
+    if not by_pos[1]:
+        return 0.0, None, [], None, []
 
-    # fill the remaining slots (11 - 7 = 4) with the best available,
-    # respecting position maxima
-    remaining_slots = 11 - sum(FORMATION_MIN.values())
-    pool = []
-    for pos in (2, 3, 4):  # outfield only; GK max is 1 already used
-        extra = by_pos[pos][used[pos]:FORMATION_MAX[pos]]
-        for val in extra:
-            pool.append(val)
-    pool.sort(reverse=True)
-    total += sum(pool[:remaining_slots])
-    return total
+    gk = by_pos[1][0]
+    best = None
+    for d, m, f in VALID_FORMATIONS:
+        if len(by_pos[2]) < d or len(by_pos[3]) < m or len(by_pos[4]) < f:
+            continue
+        starters = [gk] + by_pos[2][:d] + by_pos[3][:m] + by_pos[4][:f]
+        total = sum(v for _, v in starters)
+        cap = max(starters, key=lambda x: x[1])
+        total += cap[1]  # captain doubled
+        if best is None or total > best[0]:
+            best = (total, (d, m, f), starters, cap)
+
+    if best is None:
+        return 0.0, None, [], None, []
+
+    total, formation, starters, cap = best
+    starter_ids = {p.element_id for p, _ in starters}
+    bench = [(p, v) for p, v in playing if p.element_id not in starter_ids]
+    bench.sort(key=lambda x: x[1], reverse=True)
+    return total, formation, starters, cap, bench
+
+
+def best_xi_points(squad_players, gw):
+    """Best legal XI points for one gameweek, INCLUDING captaincy."""
+    return best_xi_detail(squad_players, gw)[0]
 
 
 def squad_twxp(squad_players, gws, decay):
@@ -362,65 +398,54 @@ def valid_squad(players):
 
 def optimize(current_ids, players, gws, decay, bank, free_transfers,
              max_transfers=2, top_n=20, progress_cb=None):
-    """Brute-force the best transfer plans up to max_transfers deep.
+    """Exhaustive brute force of transfer plans up to max_transfers deep.
 
-    Only same-position swaps are considered (a squad slot must keep its
-    position), which keeps the squad structurally valid and the search tractable.
+    For every combination of squad players sold and same-position replacements
+    bought (from the FULL candidate pool), the resulting 15-man squad is scored
+    by its decayed time-weighted expected points, where EACH gameweek
+    independently uses the optimal valid XI + captain. Respects budget, the
+    3-per-club rule and exact squad structure.
     """
     current = [players[i] for i in current_ids]
     base_twxp = squad_twxp(current, gws, decay)
-    current_set = set(current_ids)
 
-    # candidate incoming players by position, excluding those already owned,
-    # sorted by horizon TWxP (so we can prune to the strongest options)
+    # Full candidate pool by position (everyone not owned who has projections)
     owned = set(current_ids)
     by_pos_candidates = {1: [], 2: [], 3: [], 4: []}
     for p in players.values():
-        if p.element_id in owned:
+        if p.element_id in owned or not p.projections:
             continue
-        if not p.projections:
-            continue  # no data → can't evaluate
         by_pos_candidates[p.element_type].append(p)
+    # Sort by horizon value (helps early-exit / readability; NOT truncated)
     for pos in by_pos_candidates:
         by_pos_candidates[pos].sort(key=lambda p: p.twxp(gws, decay), reverse=True)
-        # keep a generous shortlist per position to bound the search
-        by_pos_candidates[pos] = by_pos_candidates[pos][:40]
 
     results = []
-
-    # ---- 0 transfers (baseline) ----
     results.append(Move([], base_twxp, 0.0, 0, 0.0, set(current_ids)))
 
-    # helper: selling value of an owned player
     sell = {p.element_id: p.selling_price for p in current}
 
-    # ---- 1 transfer ----
     def try_plans(depth):
-        # generate all combinations of `depth` squad players to sell (same-position replace)
-        for out_combo in itertools.combinations(current, depth):
-            # positions we need to refill
+        combos = list(itertools.combinations(current, depth))
+        total_combos = len(combos)
+        for ci, out_combo in enumerate(combos):
+            if progress_cb and ci % 20 == 0:
+                progress_cb(f"{depth}-transfer search: {ci}/{total_combos} out-combos…")
             need_positions = [p.element_type for p in out_combo]
             budget = bank + sum(sell[p.element_id] for p in out_combo)
             out_ids = {p.element_id for p in out_combo}
-            # remaining squad (kept players) for club-count checking
             kept = [p for p in current if p.element_id not in out_ids]
             kept_club = club_counts(kept)
 
-            # candidate in-players per outgoing slot (matching position)
-            cand_lists = []
-            for pos in need_positions:
-                cand_lists.append(by_pos_candidates[pos])
+            cand_lists = [by_pos_candidates[pos] for pos in need_positions]
 
-            # iterate combinations of incoming players (one per slot)
             for in_combo in itertools.product(*cand_lists):
                 in_ids = {p.element_id for p in in_combo}
                 if len(in_ids) != depth:
-                    continue  # same player picked twice
-                # cost check
-                cost = sum(p.now_cost for p in in_combo)
-                if cost > budget:
                     continue
-                # club constraint
+                if sum(p.now_cost for p in in_combo) > budget:
+                    continue
+                # 3-per-club
                 cc = dict(kept_club)
                 ok = True
                 for p in in_combo:
@@ -430,7 +455,6 @@ def optimize(current_ids, players, gws, decay, bank, free_transfers,
                         break
                 if not ok:
                     continue
-                # build new squad
                 new_players = kept + list(in_combo)
                 tw = squad_twxp(new_players, gws, decay)
                 delta = tw - base_twxp
@@ -443,12 +467,10 @@ def optimize(current_ids, players, gws, decay, bank, free_transfers,
 
     for depth in range(1, max_transfers + 1):
         if progress_cb:
-            progress_cb(f"Searching {depth}-transfer plans…")
+            progress_cb(f"Searching {depth}-transfer plans (exhaustive)…")
         try_plans(depth)
 
     # dedupe: collapse plans with the same INCOMING players + same net gain
-    # (which weak/equivalent player you sell doesn't matter to the user), then
-    # keep the best net per resulting squad.
     best = {}
     for m in results:
         in_ids = frozenset(n.element_id for _, n in m.transfers)
