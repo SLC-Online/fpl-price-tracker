@@ -191,7 +191,7 @@ def main():
     print("Brute-forcing transfer plans…")
     base, ranked = O.optimize(squad_ids, players, gws, args.decay, bank, free,
                               max_transfers=args.transfers, top_n=args.top,
-                              progress_cb=lambda s: print("  " + s))
+                              progress_cb=lambda s: print("  " + s, flush=True))
 
     print(f"\n{'#':>2}  {'NET':>7}  {'Δ8wk':>7}  {'HIT':>4}  MOVE")
     print('-'*70)

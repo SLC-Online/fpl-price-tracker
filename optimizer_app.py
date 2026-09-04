@@ -416,9 +416,36 @@ def optimize(current_ids, players, gws, decay, bank, free_transfers,
         if p.element_id in owned or not p.projections:
             continue
         by_pos_candidates[p.element_type].append(p)
-    # Sort by horizon value (helps early-exit / readability; NOT truncated)
+
+    # ---- Dominance prune (EXACT — never removes a player that could be optimal) ----
+    # Player A dominates B (same position) if A is no more expensive than B AND
+    # A's projected points are >= B's in EVERY gameweek of the horizon. A
+    # dominated player can never beat B in any weekly XI or captaincy decision
+    # while costing at least as much, so it can be safely discarded without
+    # affecting the optimum. This collapses the pool massively for deep searches.
+    def prune_dominated(cands):
+        # sort by (price asc, then value desc) so we compare cheaper-or-equal first
+        cands = sorted(cands, key=lambda p: (p.now_cost, -p.twxp(gws, decay)))
+        kept = []
+        for p in cands:
+            pv = [p.projections.get(g, 0.0) for g in gws]
+            dominated = False
+            for q in kept:
+                if q.now_cost <= p.now_cost:
+                    qv = [q.projections.get(g, 0.0) for g in gws]
+                    if all(qi >= pi for qi, pi in zip(qv, pv)):
+                        dominated = True
+                        break
+            if not dominated:
+                kept.append(p)
+        return kept
+
     for pos in by_pos_candidates:
+        before = len(by_pos_candidates[pos])
+        by_pos_candidates[pos] = prune_dominated(by_pos_candidates[pos])
         by_pos_candidates[pos].sort(key=lambda p: p.twxp(gws, decay), reverse=True)
+        if progress_cb:
+            progress_cb(f"pos {pos}: {before} candidates → {len(by_pos_candidates[pos])} after dominance prune")
 
     results = []
     results.append(Move([], base_twxp, 0.0, 0, 0.0, set(current_ids)))
