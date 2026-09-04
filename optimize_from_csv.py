@@ -193,38 +193,62 @@ def main():
                               max_transfers=args.transfers, top_n=args.top,
                               progress_cb=lambda s: print("  " + s, flush=True))
 
-    print(f"\n{'#':>2}  {'NET':>7}  {'Δ8wk':>7}  {'HIT':>4}  MOVE")
-    print('-'*70)
-    for i, m in enumerate(ranked):
-        mv = "KEEP current squad" if not m.transfers else \
-            "  +  ".join(f"{o.web_name}→{n.web_name}" for o, n in m.transfers)
-        print(f"{i:>2}  {m.net:>+7.2f}  {m.delta:>+7.2f}  {('-'+str(m.hit)) if m.hit else '0':>4}  {mv}")
+    # Group plans by number of transfers and show the best options at EACH depth,
+    # so you can judge whether an extra transfer is worth it yourself.
+    by_depth = {}
+    for m in ranked:
+        by_depth.setdefault(len(m.transfers), []).append(m)
 
-    # detailed breakdown of the top recommendation
-    if ranked:
-        top = ranked[0]
-        print(f"\n{'='*70}\nTOP RECOMMENDATION")
+    PER_DEPTH = 8
+    for depth in sorted(d for d in by_depth if d > 0):
+        plans = by_depth[depth][:PER_DEPTH]
+        label = f"{depth} TRANSFER" + ("" if depth == 1 else "S")
+        hitnote = "" if depth <= free else f"  (uses {depth - free} beyond your {free} free → -{(depth-free)*O.HIT_COST} hit)"
+        print(f"\n{'='*70}")
+        print(f"BEST {label}{hitnote}")
         print('='*70)
-        if not top.transfers:
-            print("Hold — no transfer beats the current squad on net expected points.")
-        else:
-            for o, n in top.transfers:
-                print(f"  OUT  {o.web_name:16s} £{o.selling_price/10:>4.1f}m   ->   "
-                      f"IN  {n.web_name:16s} £{n.now_cost/10:>4.1f}m")
-            print(f"\n  Net gain after hit: {top.net:+.2f}   (raw Δ {top.delta:+.2f}, hit -{top.hit})")
-        sq = [players[i] for i in top.squad_ids]
+        print(f"{'#':>2}  {'Δ8wk':>7}  {'HIT':>4}  {'NET':>7}  MOVE")
+        print('-'*70)
+        for i, m in enumerate(plans):
+            mv = "  +  ".join(f"{o.web_name}→{n.web_name}" for o, n in m.transfers)
+            print(f"{i:>2}  {m.delta:>+7.2f}  {('-'+str(m.hit)) if m.hit else '0':>4}  {m.net:>+7.2f}  {mv}")
+
+    # Per-depth best summary so the trade-off is obvious at a glance
+    print(f"\n{'='*70}")
+    print("TRADE-OFF SUMMARY (best plan at each depth)")
+    print('='*70)
+    print(f"  Keep squad (0 transfers):  0.00 gain")
+    for depth in sorted(d for d in by_depth if d > 0):
+        best_d = by_depth[depth][0]
+        mv = "  +  ".join(f"{o.web_name}→{n.web_name}" for o, n in best_d.transfers)
+        print(f"  {depth} transfer{'s' if depth>1 else ' '}: raw +{best_d.delta:.2f}  |  net +{best_d.net:.2f}  |  {mv}")
+    print("\n  (Raw = expected-points gain over the horizon; Net = after any -4 hits.")
+    print("   You decide whether each extra transfer's raw gain justifies using it.)")
+
+    # Detailed per-GW breakdown for the best 1-transfer and best multi options
+    def show_detail(m, header):
+        print(f"\n{'='*70}\n{header}")
+        print('='*70)
+        for o, n in m.transfers:
+            print(f"  OUT  {o.web_name:16s} £{o.selling_price/10:>4.1f}m   ->   "
+                  f"IN  {n.web_name:16s} £{n.now_cost/10:>4.1f}m")
+        print(f"\n  Raw Δ over {len(gws)} weeks: {m.delta:+.2f}   ·   Hit: -{m.hit}   ·   Net: {m.net:+.2f}")
+        sq = [players[i] for i in m.squad_ids]
         print("\n  Optimal XI, captain & formation each gameweek:")
         for gw in gws:
             total, formation, starters, cap, bench = O.best_xi_detail(sq, gw)
-            d, m, f = formation
+            d, mm, f = formation
             names = []
             for p, v in starters:
                 tag = "(C)" if p.element_id == cap[0].element_id else ""
                 names.append(f"{p.web_name}{tag} {v:.1f}")
-            print(f"\n   GW{gw}  [{d}-{m}-{f}]  total {total:.1f}  (capt {cap[0].web_name} {cap[1]:.1f}→{cap[1]*2:.1f})")
+            print(f"\n   GW{gw}  [{d}-{mm}-{f}]  total {total:.1f}  (capt {cap[0].web_name} {cap[1]:.1f}→{cap[1]*2:.1f})")
             print("     XI:  " + ", ".join(names))
-            bench_names = ", ".join(f"{p.web_name} {v:.1f}" for p, v in bench)
-            print("     Bench: " + bench_names)
+            print("     Bench: " + ", ".join(f"{p.web_name} {v:.1f}" for p, v in bench))
+
+    if 1 in by_depth:
+        show_detail(by_depth[1][0], "BEST SINGLE TRANSFER — full plan")
+    return
 
 
 if __name__ == "__main__":
