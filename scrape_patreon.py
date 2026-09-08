@@ -154,9 +154,29 @@ def supabase_delete_capture(capture_id):
     requests.delete(f"{SUPABASE_URL}/rest/v1/projection_captures?id=eq.{capture_id}", headers=h, timeout=15)
 
 
+def notify(message):
+    """Optional push alert when new Transfer Algorithm data is imported.
+    Uses Telegram if TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set; otherwise
+    no-op. Never raises fatally — a failed alert must not fail the import."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        print("  (no Telegram creds set — skipping push alert)")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat, "text": "⚽ " + message},
+            timeout=10,
+        )
+        print("  Sent push alert")
+    except Exception as e:
+        print(f"  Alert failed: {e}")
+
+
 def get_latest_post():
     """Check Patreon for the latest Transfer Algorithm post."""
-    url = f"https://www.patreon.com/api/posts?filter[campaign_id]={CAMPAIGN_ID}&filter[is_draft]=false&sort=-published_at&page[count]=5"
+    url = f"https://www.patreon.com/api/posts?filter[campaign_id]={CAMPAIGN_ID}&filter[is_draft]=false&sort=-published_at&page[count]=5&fields[post]=title,published_at,edited_at"
     resp = requests.get(url, headers=HEADERS_PATREON, timeout=15)
     if resp.status_code != 200:
         print(f"  Patreon API error: {resp.status_code}")
@@ -172,11 +192,21 @@ def get_latest_post():
             # Extract GW number from title
             gw_match = re.search(r'GW\s*(\d+)', title, re.IGNORECASE)
             if gw_match:
+                attrs = post['attributes']
+                published = attrs.get('published_at')
+                edited = attrs.get('edited_at')
+                # The creator often EDITS the existing post in place (replacing the
+                # CSV) rather than making a new post — that bumps edited_at but NOT
+                # published_at. Use the later of the two as the "version" marker so
+                # in-place updates are detected.
+                version = max(x for x in (published, edited) if x) if (published or edited) else published
                 return {
                     'post_id': post['id'],
                     'title': title,
                     'gameweek': int(gw_match.group(1)),
-                    'published_at': post['attributes']['published_at'],
+                    'published_at': published,
+                    'edited_at': edited,
+                    'version': version,
                 }
     return None
 
@@ -512,19 +542,24 @@ def main():
         print("  No Transfer Algorithm post found")
         return
 
-    print(f"  Latest post: '{latest['title']}' (GW{latest['gameweek']}, published {latest['published_at']})")
+    print(f"  Latest post: '{latest['title']}' (GW{latest['gameweek']}, published {latest['published_at']}, edited {latest.get('edited_at')})")
 
-    # Check if this post is newer than what we last imported
-    last_published = get_last_import_timestamp()
+    # Decide whether this is a version we've already imported. We use the post's
+    # 'version' marker = max(published_at, edited_at), so an IN-PLACE EDIT of the
+    # existing post (which bumps edited_at but not published_at) is treated as a
+    # new version and re-imported. The content-hash dedup downstream still avoids
+    # storing a duplicate capture if the CSV data is actually identical.
+    version = latest.get('version') or latest['published_at']
+    last_version = get_last_import_timestamp()
     force = os.environ.get("FORCE_REIMPORT", "").strip().lower() in ("1", "true", "yes")
-    if last_published and latest['published_at'] <= last_published and not force:
-        print(f"  Already imported this version (post published {latest['published_at']}, last import from {last_published}). Nothing to do.")
+    if last_version and version <= last_version and not force:
+        print(f"  Already imported this version (post version {version}, last import {last_version}). Nothing to do.")
         return
     if force:
-        print("  FORCE_REIMPORT set — re-importing regardless of timestamp")
+        print("  FORCE_REIMPORT set — re-importing regardless of version")
 
-    # New or updated post - download CSV
-    print(f"  New/updated post detected! Downloading CSV...")
+    # New or updated post/edit - download CSV
+    print(f"  New/updated version detected (v={version})! Downloading CSV...")
     csv_bytes = get_post_csv(latest['post_id'])
     if not csv_bytes:
         print("  ERROR: Could not download CSV")
@@ -533,15 +568,19 @@ def main():
     print(f"  CSV downloaded: {len(csv_bytes)} bytes")
 
     # Import
-    matched, unmatched, write_ok = import_csv(csv_bytes, latest['gameweek'], published_at=latest['published_at'])
+    matched, unmatched, write_ok = import_csv(csv_bytes, latest['gameweek'], published_at=version)
     print(f"  Import complete: {matched} matched, {len(unmatched)} unmatched")
     # Only mark this version as imported if the data actually landed in the DB.
-    # Otherwise we'll retry on the next run instead of silently skipping.
     if matched > 0 and write_ok:
-        set_last_import_timestamp(latest['published_at'])
-        print(f"  Saved import timestamp: {latest['published_at']}")
+        set_last_import_timestamp(version)
+        print(f"  Saved import version: {version}")
+        # Alert on a genuinely new capture (content changed)
+        try:
+            notify(f"Transfer Algorithm updated: {latest['title']} (v {version}) — {matched} players imported.")
+        except Exception as e:
+            print(f"  (notify skipped: {e})")
     elif matched > 0 and not write_ok:
-        print("  Data write failed — NOT saving timestamp, will retry next run")
+        print("  Data write failed — NOT saving version, will retry next run")
     if unmatched:
         print(f"  Unmatched: {unmatched[:10]}")
         if len(unmatched) > 10:
