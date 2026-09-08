@@ -154,26 +154,6 @@ def supabase_delete_capture(capture_id):
     requests.delete(f"{SUPABASE_URL}/rest/v1/projection_captures?id=eq.{capture_id}", headers=h, timeout=15)
 
 
-def notify(message):
-    """Optional push alert when new Transfer Algorithm data is imported.
-    Uses Telegram if TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set; otherwise
-    no-op. Never raises fatally — a failed alert must not fail the import."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat:
-        print("  (no Telegram creds set — skipping push alert)")
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat, "text": "⚽ " + message},
-            timeout=10,
-        )
-        print("  Sent push alert")
-    except Exception as e:
-        print(f"  Alert failed: {e}")
-
-
 def get_latest_post():
     """Check Patreon for the latest Transfer Algorithm post."""
     url = f"https://www.patreon.com/api/posts?filter[campaign_id]={CAMPAIGN_ID}&filter[is_draft]=false&sort=-published_at&page[count]=5&fields[post]=title,published_at,edited_at"
@@ -574,11 +554,6 @@ def main():
     if matched > 0 and write_ok:
         set_last_import_timestamp(version)
         print(f"  Saved import version: {version}")
-        # Alert on a genuinely new capture (content changed)
-        try:
-            notify(f"Transfer Algorithm updated: {latest['title']} (v {version}) — {matched} players imported.")
-        except Exception as e:
-            print(f"  (notify skipped: {e})")
     elif matched > 0 and not write_ok:
         print("  Data write failed — NOT saving version, will retry next run")
     if unmatched:
