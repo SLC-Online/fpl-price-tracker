@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-Standalone optimizer that reads expected points DIRECTLY from a Transfer
-Algorithm CSV (bypassing Supabase / the app). Name-matches CSV players to FPL
-element IDs, pulls the target manager's squad + free transfers from the FPL
-API, then brute-forces the best transfer plans over the CSV's gameweek horizon
-with 0.85 decay and optimal-XI-per-GW rotation.
+Thorough brute-force FPL transfer optimizer.
+
+Reads expected points either from a Transfer Algorithm CSV, OR directly from
+Supabase (final_projections) with --supabase. Name-matches to FPL element IDs,
+pulls the manager's squad + free transfers from the FPL API, then exhaustively
+brute-forces transfer plans (0.85 decay, optimal valid XI + captain each GW,
+dominance-pruned full candidate pool, hit-aware). Output grouped by depth.
 
 Usage:
+    # from the weekly CSV:
     python3 optimize_from_csv.py <manager_id> <csv_path> [--transfers N] [--horizon N] [--free N]
+    # straight from the database (no CSV needed):
+    python3 optimize_from_csv.py <manager_id> --supabase [--transfers N] ...
 """
 import sys, csv, re, argparse
 from io import StringIO
 from unicodedata import normalize, category
 
 import optimizer_app as O   # reuse Player, engine, FPL API helpers
+from optimizer_app import load_env as O_load_env
 
 # CSV team code -> FPL short_name
 TEAM_MAP = {
@@ -131,9 +137,16 @@ def load_csv_projections(csv_path, bootstrap):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Thorough brute-force FPL transfer optimizer (captaincy + rotation + hit-aware). "
+                    "Reads projections from a Transfer Algorithm CSV or directly from Supabase.")
     ap.add_argument("manager_id", type=int)
-    ap.add_argument("csv_path")
+    ap.add_argument("csv_path", nargs="?", default=None,
+                    help="Path to a Transfer Algorithm CSV. Omit and use --supabase to pull "
+                         "the latest projections straight from the database instead.")
+    ap.add_argument("--supabase", action="store_true",
+                    help="Pull projections from Supabase final_projections (needs SUPABASE_URL + "
+                         "SUPABASE_SERVICE_KEY env) instead of a CSV file.")
     ap.add_argument("--transfers", type=int, default=3,
                     help="Max transfers to consider. Always searches hit-taking depths too; "
                          "a move beyond your free transfers only wins if it beats the free "
@@ -144,15 +157,31 @@ def main():
     ap.add_argument("--top", type=int, default=20)
     args = ap.parse_args()
 
+    if not args.csv_path and not args.supabase:
+        ap.error("provide a CSV path OR use --supabase")
+
     print("Fetching FPL data…")
     bs = O.get_bootstrap()
     mgr, squad_ids, purchase, bank, ft, next_gw = O.get_manager_squad(args.manager_id, bs)
 
-    print("Parsing CSV projections + name-matching…")
-    players, all_gws, unmatched = load_csv_projections(args.csv_path, bs)
-
-    # horizon: the first N gameweeks in the CSV (already start at next GW)
-    gws = all_gws[:args.horizon]
+    unmatched = []
+    if args.supabase:
+        import os
+        url = os.environ.get("SUPABASE_URL", ""); key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+        if not (url and key):
+            # try the shared loader's .env resolution
+            url2, key2 = O_load_env()
+            url = url or url2; key = key or key2
+        if not (url and key):
+            ap.error("--supabase needs SUPABASE_URL and SUPABASE_SERVICE_KEY (env or .env)")
+        print("Loading projections from Supabase (final_projections)…")
+        players, gws, latest_gw = O.load_players(url, key, bs, next_gw, args.horizon)
+        source_label = f"Supabase final_projections (upload GW{latest_gw})"
+    else:
+        print("Parsing CSV projections + name-matching…")
+        players, all_gws, unmatched = load_csv_projections(args.csv_path, bs)
+        gws = all_gws[:args.horizon]
+        source_label = f"CSV {args.csv_path}"
 
     # attach squad prices; ensure squad players exist in the universe even if
     # they somehow weren't matched (build from bootstrap so optimization is valid)
@@ -174,14 +203,15 @@ def main():
     print(f"\n{'='*70}")
     print(f"{mgr['team_name']}  ·  {mgr['name']}")
     print(f"Bank £{bank/10:.1f}m   Free transfers: {free}   Planning GW{next_gw}")
-    print(f"CSV horizon: GW{gws[0]}–GW{gws[-1]}  ({len(gws)} weeks, decay {args.decay})")
-    print(f"Matched {len(players)} CSV players; {len(unmatched)} unmatched")
+    print(f"Source: {source_label}")
+    print(f"Horizon: GW{gws[0]}–GW{gws[-1]}  ({len(gws)} weeks, decay {args.decay})")
+    print(f"Matched {len(players)} players; {len(unmatched)} unmatched")
     print('='*70)
 
     # squad coverage check
     missing = [eid for eid in squad_ids if not players[eid].projections]
     if missing:
-        print("\n⚠ Squad players with NO CSV projection (scored 0 — check name match):")
+        print("\n⚠ Squad players with NO projection (scored 0 — check data/name match):")
         for eid in missing:
             print(f"   {players[eid].web_name} ({players[eid].team_short})")
 

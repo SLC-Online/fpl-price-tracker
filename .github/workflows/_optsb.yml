@@ -1,0 +1,18 @@
+name: opt-supabase-test
+on:
+  workflow_dispatch:
+    inputs:
+      manager: { description: 'manager id', default: '403851' }
+      transfers: { description: 'max transfers', default: '2' }
+jobs:
+  o:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install requests
+      - env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -u optimize_from_csv.py ${{ inputs.manager }} --supabase --transfers ${{ inputs.transfers }} --horizon 8 --top 6
