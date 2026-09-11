@@ -535,6 +535,17 @@ class OptimizerApp(_TkBase):
 
         self._build_ui()
 
+        # macOS/Tk sometimes opens the window behind others or unfocused, which
+        # can look like a "blank" or missing window. Force it to the front.
+        self.update_idletasks()
+        try:
+            self.lift()
+            self.attributes('-topmost', True)
+            self.after(400, lambda: self.attributes('-topmost', False))
+            self.focus_force()
+        except Exception:
+            pass
+
     # ---- UI construction ----
     def _build_ui(self):
         style = ttk.Style(self)
