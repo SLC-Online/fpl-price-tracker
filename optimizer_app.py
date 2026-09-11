@@ -397,7 +397,7 @@ def valid_squad(players):
 
 
 def optimize(current_ids, players, gws, decay, bank, free_transfers,
-             max_transfers=2, top_n=20, progress_cb=None):
+             max_transfers=2, top_n=20, progress_cb=None, use_prune=True):
     """Exhaustive brute force of transfer plans up to max_transfers deep.
 
     For every combination of squad players sold and same-position replacements
@@ -442,10 +442,12 @@ def optimize(current_ids, players, gws, decay, bank, free_transfers,
 
     for pos in by_pos_candidates:
         before = len(by_pos_candidates[pos])
-        by_pos_candidates[pos] = prune_dominated(by_pos_candidates[pos])
+        if use_prune:
+            by_pos_candidates[pos] = prune_dominated(by_pos_candidates[pos])
         by_pos_candidates[pos].sort(key=lambda p: p.twxp(gws, decay), reverse=True)
         if progress_cb:
-            progress_cb(f"pos {pos}: {before} candidates → {len(by_pos_candidates[pos])} after dominance prune")
+            tag = "after dominance prune" if use_prune else "(prune DISABLED)"
+            progress_cb(f"pos {pos}: {before} candidates → {len(by_pos_candidates[pos])} {tag}")
 
     results = []
     results.append(Move([], base_twxp, 0.0, 0, 0.0, set(current_ids)))
