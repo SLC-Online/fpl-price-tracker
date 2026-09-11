@@ -153,6 +153,11 @@ def main():
                          "options after the -4 hit.")
     ap.add_argument("--horizon", type=int, default=8)
     ap.add_argument("--decay", type=float, default=0.85)
+    ap.add_argument("--fast", action="store_true",
+                    help="Use the dominance prune for a much faster search. WARNING: not fully "
+                         "exact — it can drop valid lower-ranked options and, in rare cases "
+                         "(club-limit interactions), miss the true optimum. Default is the full "
+                         "exhaustive search (slower but guaranteed correct).")
     ap.add_argument("--free", type=int, default=None)
     ap.add_argument("--top", type=int, default=20)
     args = ap.parse_args()
@@ -223,9 +228,11 @@ def main():
     base = O.squad_twxp([players[i] for i in squad_ids], gws, args.decay)
     print(f"\nCurrent squad time-weighted xP over {len(gws)} weeks: {base:.2f}\n")
 
-    print("Brute-forcing transfer plans…")
+    mode = "FAST (pruned — approximate)" if args.fast else "FULL exhaustive (guaranteed optimum)"
+    print(f"Brute-forcing transfer plans… [{mode}]")
     base, ranked = O.optimize(squad_ids, players, gws, args.decay, bank, free,
                               max_transfers=args.transfers, top_n=args.top,
+                              use_prune=args.fast,
                               progress_cb=lambda s: print("  " + s, flush=True))
 
     # Group plans by number of transfers and show the best options at EACH depth,
