@@ -176,7 +176,10 @@ def main():
             ap.error("--supabase needs SUPABASE_URL and SUPABASE_SERVICE_KEY (env or .env)")
         print("Loading projections from Supabase (final_projections)…")
         players, gws, latest_gw = O.load_players(url, key, bs, next_gw, args.horizon)
-        source_label = f"Supabase final_projections (upload GW{latest_gw})"
+        # load_players returns the full FPL roster; keep the label honest by
+        # counting only those that actually carry projections.
+        with_proj = sum(1 for p in players.values() if p.projections)
+        source_label = f"Supabase final_projections (upload GW{latest_gw}, {with_proj} players with data)"
     else:
         print("Parsing CSV projections + name-matching…")
         players, all_gws, unmatched = load_csv_projections(args.csv_path, bs)
@@ -205,7 +208,9 @@ def main():
     print(f"Bank £{bank/10:.1f}m   Free transfers: {free}   Planning GW{next_gw}")
     print(f"Source: {source_label}")
     print(f"Horizon: GW{gws[0]}–GW{gws[-1]}  ({len(gws)} weeks, decay {args.decay})")
-    print(f"Matched {len(players)} players; {len(unmatched)} unmatched")
+    n_with_proj = sum(1 for p in players.values() if p.projections)
+    print(f"Players with projections: {n_with_proj}   ({len(unmatched)} CSV names unmatched)" if unmatched or not args.supabase
+          else f"Players with projections: {n_with_proj}")
     print('='*70)
 
     # squad coverage check
