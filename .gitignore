@@ -43,4 +43,14 @@ PLAN.md
 STATUS.md
 decision_rules.md
 engine_ai_prompt.md
-supabase/
+# Supabase: keep SQL migrations in git (they're source), ignore local artifacts
+supabase/.branches/
+supabase/.temp/
+supabase/config.toml
+supabase/**/.DS_Store
+
+
+# Secrets — never commit real credentials
+.env
+.env.local
+!.env.example
