@@ -50,12 +50,24 @@ def supabase_post(table, data, upsert_cols=None):
     else:
         url = f"{SUPABASE_URL}/rest/v1/{table}"
 
-    # Batch in chunks of 500
+    # Batch in chunks of 500, with retry/backoff on transient network errors
+    # (a single Supabase read timeout used to crash the whole hourly run).
     for i in range(0, len(data), 500):
         chunk = data[i:i+500]
-        resp = requests.post(url, headers=headers, json=chunk, timeout=30)
-        if resp.status_code not in (200, 201, 204):
-            raise Exception(f"Supabase {table} error {resp.status_code}: {resp.text[:200]}")
+        retries = 4
+        for attempt in range(retries):
+            try:
+                resp = requests.post(url, headers=headers, json=chunk, timeout=60)
+                if resp.status_code not in (200, 201, 204):
+                    raise Exception(f"Supabase {table} error {resp.status_code}: {resp.text[:200]}")
+                break
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                if attempt < retries - 1:
+                    time.sleep(5 * (attempt + 1))  # 5s, 10s, 15s backoff
+                    continue
+                raise Exception(
+                    f"Supabase {table} POST failed after {retries} attempts "
+                    f"(chunk {i}-{i+len(chunk)}): {e}")
 
 
 def supabase_get(table, params=""):
@@ -65,10 +77,18 @@ def supabase_get(table, params=""):
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
     url = f"{SUPABASE_URL}/rest/v1/{table}?{params}"
-    resp = requests.get(url, headers=headers, timeout=15)
-    if resp.status_code != 200:
-        raise Exception(f"Supabase GET {table} error: {resp.status_code}")
-    return resp.json()
+    retries = 4
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                raise Exception(f"Supabase GET {table} error: {resp.status_code}")
+            return resp.json()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt < retries - 1:
+                time.sleep(5 * (attempt + 1))
+                continue
+            raise Exception(f"Supabase GET {table} failed after {retries} attempts: {e}")
 
 
 def scrape():
