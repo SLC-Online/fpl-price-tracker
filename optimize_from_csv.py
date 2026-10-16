@@ -283,10 +283,10 @@ def main():
             names = []
             for p, v in starters:
                 tag = "(C)" if p.element_id == cap[0].element_id else ""
-                names.append(f"{p.web_name}{tag} {v:.1f}")
-            print(f"\n   GW{gw}  [{d}-{mm}-{f}]  total {total:.1f}  (capt {cap[0].web_name} {cap[1]:.1f}→{cap[1]*2:.1f})")
+                names.append(f"{p.web_name}{tag} {v:.2f}")
+            print(f"\n   GW{gw}  [{d}-{mm}-{f}]  total {total:.2f}  (capt {cap[0].web_name} {cap[1]:.2f}→{cap[1]*2:.2f})")
             print("     XI:  " + ", ".join(names))
-            print("     Bench: " + ", ".join(f"{p.web_name} {v:.1f}" for p, v in bench))
+            print("     Bench: " + ", ".join(f"{p.web_name} {v:.2f}" for p, v in bench))
 
     if 1 in by_depth:
         show_detail(by_depth[1][0], "BEST SINGLE TRANSFER — full plan")

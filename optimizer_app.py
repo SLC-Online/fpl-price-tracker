@@ -31,6 +31,7 @@ import os
 import json
 import threading
 import itertools
+from collections import namedtuple
 from dataclasses import dataclass, field
 
 try:
@@ -506,8 +507,232 @@ def optimize(current_ids, players, gws, decay, bank, free_transfers,
         key = (in_ids, round(m.net, 2))
         if key not in best or m.net > best[key].net:
             best[key] = m
-    ranked = sorted(best.values(), key=lambda m: (m.net, m.delta), reverse=True)
-    return base_twxp, ranked[:top_n]
+    ranked_all = sorted(best.values(), key=lambda m: (m.net, m.delta), reverse=True)
+    # Keep the best `top_n` plans AT EACH DEPTH, not top_n globally. Deeper
+    # depths usually out-gain shallower ones, so a single global cut can push
+    # every 1-transfer plan off the list and hide it entirely. Callers group
+    # the result by depth, so guaranteeing per-depth representation is what
+    # lets "best 1 vs best 2 vs best 3" always be shown.
+    per_depth_count = {}
+    ranked = []
+    for m in ranked_all:
+        d = len(m.transfers)
+        if per_depth_count.get(d, 0) >= top_n:
+            continue
+        per_depth_count[d] = per_depth_count.get(d, 0) + 1
+        ranked.append(m)
+    return base_twxp, ranked
+
+
+def beam_optimize(current_ids, players, gws, decay, bank, free_transfers,
+                  max_transfers=5, beam_width=400, pool_per_pos=25,
+                  top_n=20, progress_cb=None):
+    """Staged beam search for DEEP transfer plans (depth 3-5+).
+
+    Exhaustive search is combinatorial: depth d costs ~ (squad slots)^d * (pool)^d,
+    which blows up past 2 transfers. Beam search makes it tractable:
+
+      stage 0: current squad
+      stage k: from each squad kept in stage k-1, try EVERY single valid swap
+               (one out, one same-position in from the pruned pool); score each
+               resulting 15-man squad by decayed time-weighted xP; keep only the
+               top `beam_width` distinct squads -> stage k.
+
+    Each stage adds one transfer, so after k stages we have the best k-transfer
+    plans found. Because a swap at stage k is applied to an already-good squad
+    from stage k-1, strong multi-move plans are discovered without enumerating
+    every combination. This is a heuristic: with a wide enough beam it finds the
+    same optimum as exhaustive (validated at depth<=2), but it is NOT guaranteed
+    exact — a plan whose individual moves each look weak but combine well could
+    be missed if the intermediate squad fell outside the beam.
+
+    Returns (base_twxp, ranked) with the SAME Move shape as optimize(), so all
+    existing callers/renderers work unchanged. `ranked` holds the best `top_n`
+    plans at EACH depth 1..max_transfers.
+    """
+    current = [players[i] for i in current_ids]
+    base_twxp = squad_twxp(current, gws, decay)
+    sell = {p.element_id: p.selling_price for p in current}
+
+    # Candidate pool: not owned, has projections, dominance-pruned, then capped
+    # to the top `pool_per_pos` by standalone time-weighted xP per position.
+    owned = set(current_ids)
+    by_pos = {1: [], 2: [], 3: [], 4: []}
+    for p in players.values():
+        if p.element_id in owned or not p.projections:
+            continue
+        by_pos[p.element_type].append(p)
+
+    def prune_dominated(cands):
+        cands = sorted(cands, key=lambda p: (p.now_cost, -p.twxp(gws, decay)))
+        kept = []
+        for p in cands:
+            pv = [p.projections.get(g, 0.0) for g in gws]
+            if not any(
+                q.now_cost <= p.now_cost
+                and all(q.projections.get(g, 0.0) >= pi for g, pi in zip(gws, pv))
+                for q in kept
+            ):
+                kept.append(p)
+        return kept
+
+    for pos in by_pos:
+        before = len(by_pos[pos])
+        pruned = prune_dominated(by_pos[pos])
+        pruned.sort(key=lambda p: p.twxp(gws, decay), reverse=True)
+        by_pos[pos] = pruned[:pool_per_pos]
+        if progress_cb:
+            progress_cb(f"pos {pos}: {before} -> {len(by_pos[pos])} candidates "
+                        f"(dominance prune + top {pool_per_pos})")
+
+    # A beam state: (squad_ids_frozenset, list_of_(out,in)_transfers, bank_remaining)
+    State = namedtuple("State", "ids transfers bank twxp")
+    start = State(frozenset(current_ids), (), bank,
+                  base_twxp)
+
+    # id -> Player quick lookup for squads we build
+    pget = players.__getitem__
+
+    best_by_depth = {}          # depth -> list[Move]
+    seen_plan = set()           # (frozenset incoming ids) de-dupe across stages
+    frontier = [start]
+
+    for depth in range(1, max_transfers + 1):
+        if progress_cb:
+            progress_cb(f"beam stage {depth}: expanding {len(frontier)} squads…")
+        next_states = {}        # ids -> best State at this depth
+        depth_moves = []
+
+        for st in frontier:
+            squad = [pget(i) for i in st.ids]
+            squad_club = club_counts(squad)
+            for out_p in squad:
+                # money freed by selling: use the ORIGINAL squad member's selling
+                # price if it was in the starting squad, else its now_cost (a
+                # player bought earlier in the plan sells at what we paid = now_cost)
+                out_sell = sell.get(out_p.element_id, out_p.now_cost)
+                budget_after_sale = st.bank + out_sell
+                # club count without the outgoing player
+                cc_base = dict(squad_club)
+                cc_base[out_p.team_id] -= 1
+                remaining_ids = st.ids - {out_p.element_id}
+                for in_p in by_pos[out_p.element_type]:
+                    if in_p.element_id in st.ids:
+                        continue
+                    if in_p.now_cost > budget_after_sale:
+                        continue
+                    if cc_base.get(in_p.team_id, 0) + 1 > 3:
+                        continue
+                    new_ids = remaining_ids | {in_p.element_id}
+                    if len(new_ids) != 15:
+                        continue
+                    new_squad = [pget(i) for i in new_ids]
+                    tw = squad_twxp(new_squad, gws, decay)
+                    # keep best state per resulting squad composition
+                    prev = next_states.get(new_ids)
+                    if prev is None or tw > prev.twxp:
+                        next_states[new_ids] = State(
+                            new_ids, st.transfers + ((out_p, in_p),),
+                            budget_after_sale - in_p.now_cost, tw)
+
+        # rank this stage's squads, keep the beam
+        ranked_states = sorted(next_states.values(), key=lambda s: s.twxp, reverse=True)
+        frontier = ranked_states[:beam_width]
+
+        # record Moves for this depth (dedupe by set of incoming players)
+        for st in ranked_states:
+            in_ids = frozenset(n.element_id for _, n in st.transfers)
+            key = (depth, in_ids)
+            if key in seen_plan:
+                continue
+            seen_plan.add(key)
+            delta = st.twxp - base_twxp
+            hit = max(0, depth - free_transfers) * HIT_COST
+            depth_moves.append(Move(
+                transfers=list(st.transfers), twxp=st.twxp, delta=delta,
+                hit=hit, net=delta - hit, squad_ids=set(st.ids)))
+        depth_moves.sort(key=lambda m: (m.net, m.delta), reverse=True)
+        best_by_depth[depth] = depth_moves[:top_n]
+
+    ranked = [Move([], base_twxp, 0.0, 0, 0.0, set(current_ids))]
+    for depth in sorted(best_by_depth):
+        ranked.extend(best_by_depth[depth])
+    ranked.sort(key=lambda m: (m.net, m.delta), reverse=True)
+    return base_twxp, ranked
+
+
+# ----------------------------------------------------------------------------
+# Time-budget planner
+# ----------------------------------------------------------------------------
+# Cost model fit from on-machine calibration (/tmp/calib.json), measured on an
+# 8-week horizon. beam time grows ~linearly in beam_width and ~linearly in a
+# per-depth factor. Numbers are seconds per unit; conservative (round up).
+#   depth 3: ~0.030 s per unit width
+#   depth 4: ~0.055 s per unit width
+#   depth 5: ~0.085 s per unit width
+# plus a small fixed overhead. These are deliberately a touch pessimistic so a
+# budget is respected rather than overshot.
+_BEAM_SECS_PER_WIDTH = {2: 0.020, 3: 0.034, 4: 0.060, 5: 0.095, 6: 0.13, 7: 0.17}
+_BEAM_FIXED_OVERHEAD = 3.0   # seconds, pool build etc.
+# Exhaustive timings (full, prune off), measured ~168-205s at depth 2.
+_EXHAUSTIVE_SECS = {1: 15, 2: 210}
+
+
+def estimate_beam_secs(depth, width):
+    per = _BEAM_SECS_PER_WIDTH.get(depth)
+    if per is None:
+        per = 0.17 + 0.04 * max(0, depth - 7)   # extrapolate for depth > 7
+    return _BEAM_FIXED_OVERHEAD + per * width
+
+
+def plan_search(depth, budget_secs, prefer_exhaustive=True):
+    """Decide the most thorough search that fits a time budget.
+
+    Returns a dict describing the chosen plan:
+      {method: 'exhaustive'|'beam', depth, beam_width, pool, est_secs, note}
+
+    Policy (matches the agreed design):
+      * depth <= 2: use EXHAUSTIVE (guaranteed optimum) if it fits the budget;
+        otherwise fall back to a wide beam.
+      * depth >= 3: BEAM only. Pick the widest width whose estimate fits the
+        budget. If even a narrow beam overflows, use the narrow beam anyway and
+        flag that the budget was too tight (the "do the best it can and tell
+        you" option).
+    """
+    # candidate beam widths to consider, smallest to largest
+    width_ladder = [150, 200, 300, 400, 600, 800, 1200, 1500, 2000, 3000, 4000, 6000, 8000]
+    pool_for_width = lambda w: 25 if w <= 400 else (30 if w <= 800 else (40 if w <= 2000 else 55))
+
+    if depth <= 2 and prefer_exhaustive:
+        ex = _EXHAUSTIVE_SECS.get(depth, 210)
+        if ex <= budget_secs:
+            return {"method": "exhaustive", "depth": depth, "beam_width": None,
+                    "pool": None, "est_secs": ex,
+                    "note": "exhaustive fits the budget — guaranteed optimum"}
+        # exhaustive too slow for the budget: widest beam that fits
+    # beam path
+    best = None
+    for w in width_ladder:
+        est = estimate_beam_secs(depth, w)
+        if est <= budget_secs:
+            best = (w, est)
+        else:
+            break
+    if best is None:
+        # even the narrowest overflows — run it anyway, flag it
+        w = width_ladder[0]
+        est = estimate_beam_secs(depth, w)
+        return {"method": "beam", "depth": depth, "beam_width": w,
+                "pool": pool_for_width(w), "est_secs": est,
+                "note": f"budget too tight for depth {depth}; running narrowest "
+                        f"beam (width {w}, est {est:.0f}s > budget) — best effort"}
+    w, est = best
+    extra = ""
+    if depth <= 2:
+        extra = " (exhaustive wouldn't fit the budget, using wide beam instead)"
+    return {"method": "beam", "depth": depth, "beam_width": w,
+            "pool": pool_for_width(w), "est_secs": est,
+            "note": f"widest beam fitting the budget: width {w}, est {est:.0f}s{extra}"}
 
 
 # ----------------------------------------------------------------------------
