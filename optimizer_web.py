@@ -323,7 +323,7 @@ PAGE = """<!doctype html>
 </style></head><body>
 <header><h1>FPL Transfer Optimizer <span class="muted">— brute-force, captaincy + rotation, 0.85 decay</span></h1></header>
 <main>
-<form method="get" action="/run">
+<form id="optform" onsubmit="return false;">
  <label>Manager ID
    <input name="manager_id" value="{manager_id}" required></label>
  <label>Max transfers to search
@@ -356,8 +356,61 @@ PAGE = """<!doctype html>
    <input name="free" value="{free}"></label>
  <label>Decay
    <input name="decay" value="{decay}"></label>
- <button type="submit">Run optimization</button>
+ <button id="runbtn" type="submit">Run optimization</button>
 </form>
+<div id="progress" class="card" style="display:none">
+  <h3>Running… <span id="elapsed" class="muted"></span></h3>
+  <p class="muted">This can take a few minutes for deep searches. Live progress below — leave this tab open.</p>
+  <pre id="progresslog" class="log"></pre>
+</div>
+<div id="results"></div>
+<script>
+const form = document.getElementById('optform');
+const runbtn = document.getElementById('runbtn');
+const prog = document.getElementById('progress');
+const plog = document.getElementById('progresslog');
+const elapsed = document.getElementById('elapsed');
+const results = document.getElementById('results');
+let timer = null, startTs = 0;
+
+form.addEventListener('submit', async () => {{
+  const params = new URLSearchParams(new FormData(form)).toString();
+  results.innerHTML = '';
+  plog.textContent = '';
+  prog.style.display = 'block';
+  runbtn.disabled = true;
+  runbtn.textContent = 'Running…';
+  startTs = Date.now();
+  let job;
+  try {{
+    const r = await fetch('/run?' + params);
+    job = (await r.json()).job;
+  }} catch (e) {{
+    plog.textContent = 'Failed to start: ' + e;
+    runbtn.disabled = false; runbtn.textContent = 'Run optimization';
+    return;
+  }}
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => poll(job), 1200);
+  poll(job);
+}});
+
+async function poll(job) {{
+  const secs = Math.floor((Date.now() - startTs) / 1000);
+  elapsed.textContent = '(' + secs + 's)';
+  let s;
+  try {{ s = await (await fetch('/status?job=' + job)).json(); }}
+  catch (e) {{ return; }}
+  plog.textContent = (s.log || []).join('\\n');
+  plog.scrollTop = plog.scrollHeight;
+  if (s.state === 'done' || s.state === 'error') {{
+    clearInterval(timer); timer = null;
+    prog.style.display = 'none';
+    results.innerHTML = s.html || '';
+    runbtn.disabled = false; runbtn.textContent = 'Run optimization';
+  }}
+}}
+</script>
 {body}
 </main></body></html>"""
 
@@ -387,68 +440,102 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, body, code=200):
-        data = body.encode("utf-8")
+    def _send(self, body, code=200, ctype="text/html; charset=utf-8"):
+        data = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_json(self, obj, code=200):
+        import json
+        self._send(json.dumps(obj), code, "application/json")
+
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/":
+        path = parsed.path
+
+        if path == "/":
             self._send(form_page())
             return
-        if parsed.path != "/run":
-            self._send(form_page(), 404)
+
+        if path == "/status":
+            q = parse_qs(parsed.query)
+            job_id = q.get("job", [""])[0]
+            job = JOBS.get(job_id)
+            if not job:
+                self._send_json({"state": "unknown"}, 404)
+                return
+            self._send_json({
+                "state": job["state"],          # running | done | error
+                "log": job["log"][-400:],       # recent progress lines
+                "html": job.get("html", ""),    # result HTML when done
+            })
             return
 
-        q = parse_qs(parsed.query)
-        def g(k, d=""):
-            return q.get(k, [d])[0]
+        if path == "/run":
+            # Start a job and return its id immediately (non-blocking).
+            q = parse_qs(parsed.query)
+            def g(k, d=""):
+                return q.get(k, [d])[0]
+            params = {
+                "manager_id": g("manager_id", "403851"),
+                "source": g("source", "csv"),
+                "transfers": g("transfers", "2"),
+                "horizon": g("horizon", "8"),
+                "decay": g("decay", "0.85"),
+                "csv_path": g("csv_path", DEFAULT_CSV),
+                "free_raw": g("free", "").strip(),
+                "method": g("method", "auto"),
+                "budget": g("budget", "300"),
+            }
+            job_id = _start_job(params)
+            self._send_json({"job": job_id})
+            return
 
-        manager_id = g("manager_id", "403851")
-        source = g("source", "csv")
-        transfers = g("transfers", "2")
-        horizon = g("horizon", "8")
-        decay = g("decay", "0.85")
-        csv_path = g("csv_path", DEFAULT_CSV)
-        free_raw = g("free", "").strip()
-        method = g("method", "auto")
-        budget = g("budget", "300")
+        self._send(form_page(), 404)
 
-        logs = []
-        def log(s):
-            logs.append(s)
-            print(s, flush=True)
 
+JOBS = {}
+_JOB_SEQ = [0]
+
+
+def _start_job(params):
+    _JOB_SEQ[0] += 1
+    job_id = str(_JOB_SEQ[0])
+    job = {"state": "running", "log": [], "html": "", "params": params}
+    JOBS[job_id] = job
+
+    def log(s):
+        job["log"].append(s)
+        print(s, flush=True)
+
+    def worker():
         try:
             res = run_optimization(
-                manager_id=int(manager_id),
-                csv_path=csv_path,
-                use_supabase=(source == "supabase"),
-                transfers=int(transfers),
-                horizon=int(horizon),
-                decay=float(decay),
-                free_override=(int(free_raw) if free_raw else None),
+                manager_id=int(params["manager_id"]),
+                csv_path=params["csv_path"],
+                use_supabase=(params["source"] == "supabase"),
+                transfers=int(params["transfers"]),
+                horizon=int(params["horizon"]),
+                decay=float(params["decay"]),
+                free_override=(int(params["free_raw"]) if params["free_raw"] else None),
                 log=log,
-                budget_secs=float(budget),
-                method_override=(None if method == "auto" else method),
+                budget_secs=float(params["budget"]),
+                method_override=(None if params["method"] == "auto" else params["method"]),
             )
-            body = render_result(res)
-            body += f'<div class="card"><h3>Run log</h3><pre class="log">{esc(chr(10).join(logs))}</pre></div>'
+            job["html"] = render_result(res)
+            job["state"] = "done"
         except Exception as e:
             tb = traceback.format_exc()
-            body = (f'<div class="card"><p class="warn">Error: {esc(e)}</p>'
-                    f'<pre class="log">{esc(tb)}</pre>'
-                    f'<pre class="log">{esc(chr(10).join(logs))}</pre></div>')
+            job["html"] = (f'<div class="card"><p class="warn">Error: {esc(e)}</p>'
+                           f'<pre class="log">{esc(tb)}</pre></div>')
+            job["state"] = "error"
+            log(f"ERROR: {e}")
 
-        self._send(form_page(
-            body=body, manager_id=manager_id, transfers=transfers,
-            horizon=horizon, decay=decay, csv_path=csv_path,
-            free=free_raw, source=source, method=method, budget=budget,
-        ))
+    threading.Thread(target=worker, daemon=True).start()
+    return job_id
 
 
 def main():
