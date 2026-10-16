@@ -29,6 +29,7 @@ Only depends on `requests` (pip install requests). Tkinter ships with Python.
 
 import os
 import json
+import time
 import threading
 import itertools
 from collections import namedtuple
@@ -126,9 +127,28 @@ class Player:
 # FPL API
 # ----------------------------------------------------------------------------
 def fpl_get(path):
-    r = requests.get(f"{FPL_BASE}/{path}", headers={"User-Agent": "FPL-Optimizer/1.0"}, timeout=20)
-    r.raise_for_status()
-    return r.json()
+    """GET from the FPL API with retry/backoff — the entry/ endpoints 503 and
+    time out intermittently, which used to kill a whole optimization run."""
+    last = None
+    for attempt in range(4):
+        try:
+            r = requests.get(f"{FPL_BASE}/{path}",
+                             headers={"User-Agent": "FPL-Optimizer/1.0"}, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError) as e:
+            last = e
+            # retry on timeouts/connection drops and 5xx; give up on 4xx
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and 400 <= status < 500:
+                raise
+            if attempt < 3:
+                time.sleep(3 * (attempt + 1))   # 3s, 6s, 9s
+                continue
+            raise
+    raise last if last else RuntimeError(f"FPL GET {path} failed")
 
 
 def get_bootstrap():

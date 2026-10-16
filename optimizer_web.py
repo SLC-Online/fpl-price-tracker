@@ -284,156 +284,224 @@ def render_result(res):
     return "".join(parts)
 
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8"><title>FPL Transfer Optimizer</title>
 <style>
- body{{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;
-   margin:0;background:#0f1419;color:#e6e6e6}}
- header{{background:#16202a;padding:16px 24px;border-bottom:1px solid #26313d}}
- h1{{margin:0;font-size:18px}}
- main{{max-width:1200px;margin:0 auto;padding:24px}}
- form{{background:#16202a;padding:20px;border-radius:10px;margin-bottom:24px;
-   display:grid;grid-template-columns:repeat(2,1fr);gap:14px}}
- label{{display:flex;flex-direction:column;font-size:12px;color:#9fb0c0;gap:4px}}
- input,select{{padding:8px;border-radius:6px;border:1px solid #2c3a49;
-   background:#0f1419;color:#e6e6e6;font-size:14px}}
- .full{{grid-column:1/3}}
- button{{grid-column:1/3;padding:12px;border:0;border-radius:8px;
-   background:#2f81f7;color:#fff;font-size:15px;font-weight:600;cursor:pointer}}
- button:hover{{background:#1f6feb}}
- .card{{background:#16202a;border:1px solid #26313d;border-radius:10px;
-   padding:18px;margin-bottom:20px;overflow-x:auto}}
- h2,h3,h4{{margin:0 0 10px}}
- .muted{{color:#8a97a5;font-weight:400}}
- .meta{{color:#b8c4d0}}
- .warn{{color:#f7b955;background:#2a2313;padding:8px 12px;border-radius:6px}}
- .ok{{color:#7ee787;background:#13251a;padding:8px 12px;border-radius:6px}}
- table{{border-collapse:collapse;width:100%;font-size:13px}}
- th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #26313d;
-   vertical-align:top;white-space:nowrap}}
- th{{color:#9fb0c0;font-weight:600}}
- table.grid td.xi{{white-space:normal}}
- .pl{{display:inline-block;padding:2px 7px;margin:2px;border-radius:5px;
-   background:#1d2a36}}
- .pl.cap{{background:#2f4a2f;color:#c9f5c9}}
- .gw{{font-weight:700}}
- .tot b{{color:#7ee787}}
- pre.log{{background:#0b0f14;color:#9fb0c0;padding:12px;border-radius:8px;
-   white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto}}
+ body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;
+   margin:0;background:#0f1419;color:#e6e6e6}
+ header{background:#16202a;padding:14px 24px;border-bottom:1px solid #26313d}
+ h1{margin:0;font-size:17px}
+ main{max-width:1200px;margin:0 auto;padding:20px 24px}
+ /* tab bar */
+ #tabbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:18px}
+ .tab{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px 8px 0 0;
+   background:#16202a;border:1px solid #26313d;border-bottom:none;cursor:pointer;font-size:13px}
+ .tab.active{background:#1d2a36;color:#fff;font-weight:600}
+ .tab .glyph{font-size:12px}
+ .tab .close{opacity:.5;font-size:14px;line-height:1}
+ .tab .close:hover{opacity:1;color:#f77}
+ #addtab{padding:8px 12px;border-radius:8px;background:#0f1419;border:1px dashed #3a4a5a;
+   color:#9fb0c0;cursor:pointer;font-size:13px}
+ #addtab:hover{border-color:#2f81f7;color:#cfe0f0}
+ form{background:#16202a;padding:18px;border-radius:0 10px 10px 10px;margin-bottom:20px;
+   display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+ label{display:flex;flex-direction:column;font-size:12px;color:#9fb0c0;gap:4px}
+ input,select{padding:8px;border-radius:6px;border:1px solid #2c3a49;
+   background:#0f1419;color:#e6e6e6;font-size:14px}
+ .full{grid-column:1/3}
+ button.run{grid-column:1/3;padding:12px;border:0;border-radius:8px;
+   background:#2f81f7;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+ button.run:hover{background:#1f6feb}
+ button.run:disabled{background:#2a3744;cursor:default}
+ .card{background:#16202a;border:1px solid #26313d;border-radius:10px;
+   padding:18px;margin-bottom:20px;overflow-x:auto}
+ h2,h3,h4{margin:0 0 10px}
+ .muted{color:#8a97a5;font-weight:400}
+ .meta{color:#b8c4d0}
+ .warn{color:#f7b955;background:#2a2313;padding:8px 12px;border-radius:6px}
+ .ok{color:#7ee787;background:#13251a;padding:8px 12px;border-radius:6px}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #26313d;
+   vertical-align:top;white-space:nowrap}
+ th{color:#9fb0c0;font-weight:600}
+ table.grid td.xi{white-space:normal}
+ .pl{display:inline-block;padding:2px 7px;margin:2px;border-radius:5px;background:#1d2a36}
+ .pl.cap{background:#2f4a2f;color:#c9f5c9}
+ .gw{font-weight:700}
+ .tot b{color:#7ee787}
+ pre.log{background:#0b0f14;color:#9fb0c0;padding:12px;border-radius:8px;
+   white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto}
+ .hidden{display:none}
 </style></head><body>
-<header><h1>FPL Transfer Optimizer <span class="muted">— brute-force, captaincy + rotation, 0.85 decay</span></h1></header>
+<header><h1>FPL Transfer Optimizer <span class="muted">— one tab per team · runs in parallel</span></h1></header>
 <main>
-<form id="optform" onsubmit="return false;">
- <label>Manager ID
-   <input name="manager_id" value="{manager_id}" required></label>
- <label>Max transfers to search
-   <input name="transfers" type="number" min="1" max="5" value="{transfers}"></label>
- <label>Search method
-   <select name="method">
-     <option value="auto" {auto_sel}>Auto (exhaustive if ≤2 & fits budget, else beam)</option>
-     <option value="exhaustive" {exh_sel}>Exhaustive — guaranteed best (slow, depth ≤2)</option>
-     <option value="beam" {beam_sel}>Beam — fast, near-exact (any depth)</option>
-   </select></label>
- <label>Time budget (for beam / deep searches)
-   <select name="budget">
-     <option value="60" {b1_sel}>1 minute</option>
-     <option value="120" {b2_sel}>2 minutes</option>
-     <option value="300" {b5_sel}>5 minutes</option>
-     <option value="600" {b10_sel}>10 minutes</option>
-     <option value="1200" {b20_sel}>20 minutes</option>
-     <option value="3600" {b60_sel}>60 minutes</option>
-   </select></label>
- <label>Data source
-   <select name="source">
-     <option value="csv" {csv_sel}>CSV file</option>
-     <option value="supabase" {sup_sel}>Supabase (final_projections)</option>
-   </select></label>
- <label>Horizon (weeks)
-   <input name="horizon" type="number" min="1" max="8" value="{horizon}"></label>
- <label class="full">CSV path (used when source = CSV)
-   <input name="csv_path" value="{csv_path}"></label>
- <label>Free transfers override (blank = auto from FPL)
-   <input name="free" value="{free}"></label>
- <label>Decay
-   <input name="decay" value="{decay}"></label>
- <button id="runbtn" type="submit">Run optimization</button>
-</form>
-<div id="progress" class="card" style="display:none">
-  <h3>Running… <span id="elapsed" class="muted"></span></h3>
-  <p class="muted">This can take a few minutes for deep searches. Live progress below — leave this tab open.</p>
-  <pre id="progresslog" class="log"></pre>
-</div>
-<div id="results"></div>
+ <div id="tabbar"></div>
+ <div id="panels"></div>
+</main>
 <script>
-const form = document.getElementById('optform');
-const runbtn = document.getElementById('runbtn');
-const prog = document.getElementById('progress');
-const plog = document.getElementById('progresslog');
-const elapsed = document.getElementById('elapsed');
-const results = document.getElementById('results');
-let timer = null, startTs = 0;
+// Each tab is an independent optimization: its own form, job, polling, results.
+const DEFAULT_CSV = "__DEFAULT_CSV__";
+let seq = 0;
+const tabs = [];           // {id, name, state, el, panel, form, job, timer, startTs}
+let activeId = null;
 
-form.addEventListener('submit', async () => {{
-  const params = new URLSearchParams(new FormData(form)).toString();
-  results.innerHTML = '';
-  plog.textContent = '';
-  prog.style.display = 'block';
-  runbtn.disabled = true;
-  runbtn.textContent = 'Running…';
-  startTs = Date.now();
-  let job;
-  try {{
-    const r = await fetch('/run?' + params);
-    job = (await r.json()).job;
-  }} catch (e) {{
-    plog.textContent = 'Failed to start: ' + e;
-    runbtn.disabled = false; runbtn.textContent = 'Run optimization';
-    return;
-  }}
-  if (timer) clearInterval(timer);
-  timer = setInterval(() => poll(job), 1200);
-  poll(job);
-}});
+function glyphFor(state){
+  return state==='running' ? '<span class="glyph" style="color:#f7b955">\u27f3</span>'
+       : state==='done'    ? '<span class="glyph" style="color:#7ee787">\u2713</span>'
+       : state==='error'   ? '<span class="glyph" style="color:#f77">\u26a0</span>'
+       : '<span class="glyph muted">\u00b7</span>';
+}
 
-async function poll(job) {{
-  const secs = Math.floor((Date.now() - startTs) / 1000);
-  elapsed.textContent = '(' + secs + 's)';
-  let s;
-  try {{ s = await (await fetch('/status?job=' + job)).json(); }}
-  catch (e) {{ return; }}
-  plog.textContent = (s.log || []).join('\\n');
-  plog.scrollTop = plog.scrollHeight;
-  if (s.state === 'done' || s.state === 'error') {{
-    clearInterval(timer); timer = null;
-    prog.style.display = 'none';
-    results.innerHTML = s.html || '';
-    runbtn.disabled = false; runbtn.textContent = 'Run optimization';
-  }}
-}}
+function renderTabBar(){
+  const bar = document.getElementById('tabbar');
+  bar.innerHTML = '';
+  tabs.forEach(t => {
+    const d = document.createElement('div');
+    d.className = 'tab' + (t.id===activeId ? ' active' : '');
+    d.innerHTML = glyphFor(t.state) + '<span>'+ (t.name||'New') +'</span>'
+                + '<span class="close" title="close">\u00d7</span>';
+    d.onclick = (e) => {
+      if (e.target.classList.contains('close')) { closeTab(t.id); return; }
+      activate(t.id);
+    };
+    bar.appendChild(d);
+  });
+  const add = document.createElement('div');
+  add.id = 'addtab'; add.textContent = '+ add team';
+  add.onclick = () => { newTab(); };
+  bar.appendChild(add);
+}
+
+function activate(id){
+  activeId = id;
+  tabs.forEach(t => t.panel.classList.toggle('hidden', t.id!==id));
+  renderTabBar();
+}
+
+function closeTab(id){
+  const i = tabs.findIndex(t=>t.id===id);
+  if (i<0) return;
+  const t = tabs[i];
+  if (t.timer) clearInterval(t.timer);
+  t.panel.remove();
+  tabs.splice(i,1);
+  if (activeId===id) activeId = tabs.length ? tabs[Math.max(0,i-1)].id : null;
+  if (!tabs.length) newTab();
+  else activate(activeId);
+}
+
+function panelHTML(){
+  return `
+  <form onsubmit="return false;">
+    <label>Manager ID
+      <input name="manager_id" value="403851" required></label>
+    <label>Max transfers to search
+      <input name="transfers" type="number" min="1" max="5" value="2"></label>
+    <label>Search method
+      <select name="method">
+        <option value="auto">Auto (exhaustive if \u22642 &amp; fits budget, else beam)</option>
+        <option value="exhaustive">Exhaustive \u2014 guaranteed best (slow, depth \u22642)</option>
+        <option value="beam">Beam \u2014 fast, near-exact (any depth)</option>
+      </select></label>
+    <label>Time budget (beam / deep searches)
+      <select name="budget">
+        <option value="60">1 minute</option>
+        <option value="120">2 minutes</option>
+        <option value="300" selected>5 minutes</option>
+        <option value="600">10 minutes</option>
+        <option value="1200">20 minutes</option>
+        <option value="3600">60 minutes</option>
+      </select></label>
+    <label>Data source
+      <select name="source">
+        <option value="supabase" selected>Supabase (final_projections)</option>
+        <option value="csv">CSV file</option>
+      </select></label>
+    <label>Horizon (weeks)
+      <input name="horizon" type="number" min="1" max="8" value="8"></label>
+    <label class="full">CSV path (used when source = CSV)
+      <input name="csv_path" value="${DEFAULT_CSV}"></label>
+    <label>Free transfers override (blank = auto from FPL)
+      <input name="free" value=""></label>
+    <label>Decay
+      <input name="decay" value="0.85"></label>
+    <button class="run" type="submit">Run optimization</button>
+  </form>
+  <div class="progress card hidden">
+    <h3>Running\u2026 <span class="elapsed muted"></span></h3>
+    <p class="muted">Deep searches can take a few minutes. Live progress below.
+       You can switch tabs \u2014 this keeps running.</p>
+    <pre class="plog log"></pre>
+  </div>
+  <div class="results"></div>`;
+}
+
+function newTab(){
+  seq += 1;
+  const id = seq;
+  const panel = document.createElement('div');
+  panel.innerHTML = panelHTML();
+  document.getElementById('panels').appendChild(panel);
+  const t = {id, name:'New', state:'idle', panel,
+             form: panel.querySelector('form'),
+             job:null, timer:null, startTs:0};
+  tabs.push(t);
+  wire(t);
+  activate(id);
+}
+
+function wire(t){
+  const btn = t.form.querySelector('button.run');
+  const prog = t.panel.querySelector('.progress');
+  const plog = t.panel.querySelector('.plog');
+  const elapsed = t.panel.querySelector('.elapsed');
+  const results = t.panel.querySelector('.results');
+
+  t.form.addEventListener('submit', async () => {
+    const params = new URLSearchParams(new FormData(t.form)).toString();
+    t.name = t.form.manager_id.value || 'New';
+    t.state = 'running'; renderTabBar();
+    results.innerHTML = ''; plog.textContent = '';
+    prog.classList.remove('hidden');
+    btn.disabled = true; btn.textContent = 'Running\u2026';
+    t.startTs = Date.now();
+    let job;
+    try { job = (await (await fetch('/run?'+params)).json()).job; }
+    catch(e){ plog.textContent='Failed to start: '+e; btn.disabled=false; btn.textContent='Run optimization'; t.state='error'; renderTabBar(); return; }
+    t.job = job;
+    if (t.timer) clearInterval(t.timer);
+    t.timer = setInterval(()=>poll(t), 1200);
+    poll(t);
+  });
+
+  async function poll(t){
+    const prog = t.panel.querySelector('.progress');
+    const plog = t.panel.querySelector('.plog');
+    const elapsed = t.panel.querySelector('.elapsed');
+    const results = t.panel.querySelector('.results');
+    const btn = t.form.querySelector('button.run');
+    elapsed.textContent = '(' + Math.floor((Date.now()-t.startTs)/1000) + 's)';
+    let s;
+    try { s = await (await fetch('/status?job='+t.job)).json(); } catch(e){ return; }
+    plog.textContent = (s.log||[]).join('\n');
+    plog.scrollTop = plog.scrollHeight;
+    if (s.state==='done' || s.state==='error'){
+      clearInterval(t.timer); t.timer=null;
+      prog.classList.add('hidden');
+      results.innerHTML = s.html || '';
+      btn.disabled=false; btn.textContent='Run optimization';
+      t.state = s.state; renderTabBar();
+    }
+  }
+}
+
+newTab();   // start with one tab
 </script>
-{body}
-</main></body></html>"""
+</body></html>"""
 
 
-def form_page(body="", manager_id="403851", transfers="2", horizon="8",
-              decay="0.85", csv_path=DEFAULT_CSV, free="", source="csv",
-              method="auto", budget="300"):
-    return PAGE.format(
-        manager_id=esc(manager_id), transfers=esc(transfers), horizon=esc(horizon),
-        decay=esc(decay), csv_path=esc(csv_path), free=esc(free),
-        csv_sel="selected" if source == "csv" else "",
-        sup_sel="selected" if source == "supabase" else "",
-        auto_sel="selected" if method == "auto" else "",
-        exh_sel="selected" if method == "exhaustive" else "",
-        beam_sel="selected" if method == "beam" else "",
-        b1_sel="selected" if budget == "60" else "",
-        b2_sel="selected" if budget == "120" else "",
-        b5_sel="selected" if budget == "300" else "",
-        b10_sel="selected" if budget == "600" else "",
-        b20_sel="selected" if budget == "1200" else "",
-        b60_sel="selected" if budget == "3600" else "",
-        body=body,
-    )
+def form_page():
+    return PAGE.replace("__DEFAULT_CSV__", DEFAULT_CSV)
 
 
 class Handler(BaseHTTPRequestHandler):
