@@ -54,3 +54,6 @@ supabase/**/.DS_Store
 .env
 .env.local
 !.env.example
+
+# App server log
+.app_server.log

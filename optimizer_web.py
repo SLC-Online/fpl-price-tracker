@@ -611,10 +611,12 @@ def main():
     url = f"http://{HOST}:{PORT}"
     print(f"FPL optimizer UI running at {url}")
     print("Open that URL in your browser. Press Ctrl+C to stop.")
-    try:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    except Exception:
-        pass
+    # Auto-open the browser unless told not to (the .app launcher opens it).
+    if os.environ.get("OPT_NO_BROWSER") != "1":
+        try:
+            threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        except Exception:
+            pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:
