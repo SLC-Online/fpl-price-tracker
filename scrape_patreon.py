@@ -406,6 +406,7 @@ def import_csv(csv_bytes, gameweek, season='2026-27', published_at=None):
                 new_mappings.append({
                     'csv_name': name, 'csv_team': team, 'element_id': element_id,
                     'confidence': score, 'source': 'auto', 'season': season,
+                    'notes': None,
                 })
             else:
                 new_mappings.append({
