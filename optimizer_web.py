@@ -332,19 +332,59 @@ PAGE = r"""<!doctype html>
  pre.log{background:#0b0f14;color:#9fb0c0;padding:12px;border-radius:8px;
    white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto}
  .hidden{display:none}
+ /* header + Transfer Algorithm status chip */
+ header.hdr{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+ .ta{display:flex;align-items:center;gap:10px;padding:6px 6px 6px 12px;border-radius:10px;
+   background:#0f1419;border:1px solid #26313d}
+ .ta-dot{width:8px;height:8px;border-radius:50%;background:#475569;flex:none}
+ .ta-dot.ta-ok{background:#10b981}
+ .ta-dot.ta-warn{background:#f59e0b}
+ .ta-dot.ta-busy{background:#818cf8;box-shadow:0 0 0 0 rgba(129,140,248,.6);animation:pulse 1.4s infinite}
+ @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(129,140,248,.55)}70%{box-shadow:0 0 0 7px rgba(129,140,248,0)}100%{box-shadow:0 0 0 0 rgba(129,140,248,0)}}
+ .ta-main{font-size:13px;font-weight:600;color:#e6e6e6;white-space:nowrap}
+ .ta-sub{font-size:11px;color:#8a97a5;white-space:nowrap}
+ .ta-split{position:relative;display:flex}
+ .ta-btn{display:inline-flex;align-items:center;gap:6px;border:0;background:#6366f1;color:#fff;
+   font-size:12px;font-weight:600;padding:7px 10px;cursor:pointer;border-radius:7px 0 0 7px}
+ .ta-btn:hover{background:#818cf8}
+ .ta-btn:disabled{opacity:.6;cursor:default}
+ .ta-caret{border-radius:0 7px 7px 0;padding:7px 7px;border-left:1px solid rgba(255,255,255,.18)}
+ .ta-spin{animation:spin 1s linear infinite}
+ @keyframes spin{to{transform:rotate(360deg)}}
+ .ta-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;width:240px;padding:4px;
+   background:#1a2440;border:1px solid #243054;border-radius:9px;box-shadow:0 12px 28px rgba(0,0,0,.45)}
+ .ta-menu button{display:block;width:100%;text-align:left;background:none;border:0;color:inherit;
+   padding:8px 10px;border-radius:6px;cursor:pointer}
+ .ta-menu button:hover{background:#243054}
+ .ta-menu .t{display:block;font-size:13px;color:#f8fafc}
+ .ta-menu .d{display:block;font-size:11px;color:#8a97a5;margin-top:1px}
 </style></head><body>
-<header><h1>FPL Transfer Optimizer <span class="muted">— one tab per team · runs in parallel</span></h1></header>
-<main>
- <div id="tabar" class="card" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin-bottom:16px">
-   <div style="flex:1;min-width:260px">
-     <div style="font-size:12px;color:#9fb0c0">Transfer Algorithm data in database</div>
-     <div id="ta-main" style="font-weight:600">checking\u2026</div>
-     <div id="ta-sub" class="muted" style="font-size:12px"></div>
+<header class="hdr">
+ <h1>FPL Transfer Optimizer <span class="muted">— one tab per team · runs in parallel</span></h1>
+ <div id="ta" class="ta">
+   <span id="ta-dot" class="ta-dot"></span>
+   <div class="ta-text">
+     <div id="ta-main" class="ta-main">Transfer Algorithm data…</div>
+     <div id="ta-sub" class="ta-sub"></div>
    </div>
-   <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px">
-     <input type="checkbox" id="ta-force"> force full re-import</label>
-   <button id="ta-btn" class="run" style="grid-column:auto;padding:9px 16px;font-size:13px" onclick="taRefresh()">Check for updates now</button>
+   <div class="ta-split">
+     <button id="ta-btn" class="ta-btn" onclick="taRefresh(false)" title="Check Patreon for an updated Transfer Algorithm post">
+       <svg id="ta-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+       <span id="ta-label">Sync</span>
+     </button>
+     <button id="ta-more" class="ta-btn ta-caret" aria-label="More sync options" onclick="taMenu(event)">
+       <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+     </button>
+     <div id="ta-menu" class="ta-menu hidden">
+       <button onclick="taRefresh(true)">
+         <span class="t">Force re-import</span>
+         <span class="d">Re-download the latest post even if it looks unchanged</span>
+       </button>
+     </div>
+   </div>
  </div>
+</header>
+<main>
  <div id="tabbar"></div>
  <div id="panels"></div>
 </main>
@@ -507,63 +547,84 @@ function wire(t){
 
 newTab();   // start with one tab
 
-// ---- Transfer Algorithm freshness bar ----
+// ---- Transfer Algorithm status chip (header) ----
 function ago(iso){
   const s = Math.max(0, (Date.now() - new Date(iso).getTime())/1000);
   if (s < 90) return 'just now';
   if (s < 5400) return Math.round(s/60) + ' min ago';
-  if (s < 172800) return Math.round(s/3600) + ' h ago';
+  if (s < 86400) return Math.round(s/3600) + ' h ago';
+  if (s < 172800) return 'yesterday';
   return Math.round(s/86400) + ' days ago';
 }
-let taWatching = false;
+let taWatching = false, taNotice = '';
+function taSetBusy(busy, label){
+  const btn = document.getElementById('ta-btn'), more = document.getElementById('ta-more');
+  btn.disabled = busy; more.disabled = busy;
+  document.getElementById('ta-ico').classList.toggle('ta-spin', busy);
+  document.getElementById('ta-label').textContent = label || (busy ? 'Syncing\u2026' : 'Sync');
+}
 async function taLoad(){
   let s;
   try { s = await (await fetch('/ta_status')).json(); } catch(e){ return null; }
-  const main = document.getElementById('ta-main');
-  const sub = document.getElementById('ta-sub');
-  const btn = document.getElementById('ta-btn');
-  const c = s.capture;
+  const main = document.getElementById('ta-main'), sub = document.getElementById('ta-sub');
+  const dot = document.getElementById('ta-dot'), chip = document.getElementById('ta');
+  const c = s.capture, r = s.run;
+  const running = !!r && r.status !== 'completed';
+  const failed = !!r && r.status === 'completed' && r.conclusion && r.conclusion !== 'success';
+
   if (c) {
-    const when = new Date(c.captured_at);
-    main.textContent = 'Last updated ' + when.toLocaleString() + '  (' + ago(c.captured_at) + ')';
-    sub.textContent = 'For GW' + c.uploaded_for_gw + ' \u00b7 ' + c.row_count + ' rows \u00b7 ' + c.player_count + ' players';
+    main.textContent = 'GW' + c.uploaded_for_gw + ' data \u00b7 updated ' + ago(c.captured_at);
+    chip.title = 'Transfer Algorithm data captured ' + new Date(c.captured_at).toLocaleString()
+               + ' \u2014 ' + c.row_count + ' rows, ' + c.player_count + ' players';
   } else {
-    main.textContent = 'No Transfer Algorithm data found'; sub.textContent = '';
+    main.textContent = 'No Transfer Algorithm data';
   }
-  const r = s.run;
-  if (r) {
-    const running = r.status !== 'completed';
-    const lastCheck = 'Last automatic check: ' + new Date(r.createdAt).toLocaleString() + ' (' + ago(r.createdAt) + ')';
-    sub.textContent += (sub.textContent ? ' \u00b7 ' : '') + (running ? 'import running now\u2026' : lastCheck
-                       + (r.conclusion && r.conclusion!=='success' ? ' \u2014 ' + r.conclusion.toUpperCase() : ''));
-    btn.disabled = running;
-    if (running) btn.textContent = 'Import running\u2026';
-    else if (!taWatching) btn.textContent = 'Check for updates now';
-    return running;
-  }
-  if (!s.gh) { sub.textContent += ' \u00b7 GitHub CLI not found \u2014 button disabled'; btn.disabled = true; }
-  if (s.error) sub.textContent += ' \u00b7 ' + s.error;
-  return false;
+
+  if (taNotice) sub.textContent = taNotice;
+  else if (running) sub.textContent = 'Import running\u2026';
+  else if (r) sub.textContent = 'Last check ' + ago(r.createdAt) + (failed ? ' \u00b7 run failed' : '');
+  else if (!s.gh) sub.textContent = 'Sync unavailable (GitHub CLI not found)';
+  else sub.textContent = '';
+
+  dot.className = 'ta-dot ' + (running || taWatching ? 'ta-busy' : failed ? 'ta-warn' : c ? 'ta-ok' : '');
+  if (!s.gh) { taSetBusy(true, 'Sync'); return false; }
+  if (!taWatching) taSetBusy(running);
+  return running;
 }
-async function taRefresh(){
-  const btn = document.getElementById('ta-btn');
-  btn.disabled = true; btn.textContent = 'Starting\u2026';
-  const force = document.getElementById('ta-force').checked ? 1 : 0;
+function taMenu(e){
+  e.stopPropagation();
+  document.getElementById('ta-menu').classList.toggle('hidden');
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.ta-split')) document.getElementById('ta-menu').classList.add('hidden');
+});
+async function taRefresh(force){
+  document.getElementById('ta-menu').classList.add('hidden');
+  const before = (await (await fetch('/ta_status')).json()).capture;
+  taNotice = ''; taWatching = true; taSetBusy(true);
+  document.getElementById('ta-dot').className = 'ta-dot ta-busy';
+  document.getElementById('ta-sub').textContent = 'Starting import\u2026';
   try {
-    const r = await fetch('/ta_refresh?force=' + force);
-    const j = await r.json();
-    if (!j.ok) { document.getElementById('ta-sub').textContent = 'Could not start: ' + j.error; btn.disabled=false; btn.textContent='Check for updates now'; return; }
-  } catch(e){ btn.disabled=false; btn.textContent='Check for updates now'; return; }
-  taWatching = true;
-  await new Promise(r => setTimeout(r, 6000));     // let GitHub register the run
-  for (let i = 0; i < 60; i++) {                   // poll up to ~3 min
-    const running = await taLoad();
-    if (running === false) break;
+    const j = await (await fetch('/ta_refresh?force=' + (force ? 1 : 0))).json();
+    if (!j.ok) throw new Error(j.error || 'could not start');
+  } catch(e) {
+    taWatching = false; taNotice = 'Couldn\u2019t start sync'; await taLoad(); return;
+  }
+  document.getElementById('ta-sub').textContent = 'Checking Patreon\u2026';
+  await new Promise(r => setTimeout(r, 6000));      // let GitHub register the run
+  let s = null;
+  for (let i = 0; i < 60; i++) {                    // follow it, up to ~3 min
+    try { s = await (await fetch('/ta_status')).json(); } catch(e) {}
+    if (s && s.run && s.run.status === 'completed') break;
     await new Promise(r => setTimeout(r, 3000));
   }
   taWatching = false;
-  btn.disabled = false; btn.textContent = 'Check for updates now';
+  const after = s && s.capture;
+  if (s && s.run && s.run.conclusion && s.run.conclusion !== 'success') taNotice = 'Sync failed';
+  else if (after && (!before || after.captured_at !== before.captured_at)) taNotice = 'New data imported';
+  else taNotice = 'Up to date \u2014 no newer post';
   await taLoad();
+  setTimeout(() => { taNotice = ''; taLoad(); }, 12000);
 }
 taLoad();
 setInterval(() => { if (!taWatching) taLoad(); }, 60000);
