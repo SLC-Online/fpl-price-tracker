@@ -335,6 +335,16 @@ PAGE = r"""<!doctype html>
 </style></head><body>
 <header><h1>FPL Transfer Optimizer <span class="muted">— one tab per team · runs in parallel</span></h1></header>
 <main>
+ <div id="tabar" class="card" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:12px 16px;margin-bottom:16px">
+   <div style="flex:1;min-width:260px">
+     <div style="font-size:12px;color:#9fb0c0">Transfer Algorithm data in database</div>
+     <div id="ta-main" style="font-weight:600">checking\u2026</div>
+     <div id="ta-sub" class="muted" style="font-size:12px"></div>
+   </div>
+   <label style="flex-direction:row;align-items:center;gap:6px;font-size:12px">
+     <input type="checkbox" id="ta-force"> force full re-import</label>
+   <button id="ta-btn" class="run" style="grid-column:auto;padding:9px 16px;font-size:13px" onclick="taRefresh()">Check for updates now</button>
+ </div>
  <div id="tabbar"></div>
  <div id="panels"></div>
 </main>
@@ -496,6 +506,67 @@ function wire(t){
 }
 
 newTab();   // start with one tab
+
+// ---- Transfer Algorithm freshness bar ----
+function ago(iso){
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime())/1000);
+  if (s < 90) return 'just now';
+  if (s < 5400) return Math.round(s/60) + ' min ago';
+  if (s < 172800) return Math.round(s/3600) + ' h ago';
+  return Math.round(s/86400) + ' days ago';
+}
+let taWatching = false;
+async function taLoad(){
+  let s;
+  try { s = await (await fetch('/ta_status')).json(); } catch(e){ return null; }
+  const main = document.getElementById('ta-main');
+  const sub = document.getElementById('ta-sub');
+  const btn = document.getElementById('ta-btn');
+  const c = s.capture;
+  if (c) {
+    const when = new Date(c.captured_at);
+    main.textContent = 'Last updated ' + when.toLocaleString() + '  (' + ago(c.captured_at) + ')';
+    sub.textContent = 'For GW' + c.uploaded_for_gw + ' \u00b7 ' + c.row_count + ' rows \u00b7 ' + c.player_count + ' players';
+  } else {
+    main.textContent = 'No Transfer Algorithm data found'; sub.textContent = '';
+  }
+  const r = s.run;
+  if (r) {
+    const running = r.status !== 'completed';
+    const lastCheck = 'Last automatic check: ' + new Date(r.createdAt).toLocaleString() + ' (' + ago(r.createdAt) + ')';
+    sub.textContent += (sub.textContent ? ' \u00b7 ' : '') + (running ? 'import running now\u2026' : lastCheck
+                       + (r.conclusion && r.conclusion!=='success' ? ' \u2014 ' + r.conclusion.toUpperCase() : ''));
+    btn.disabled = running;
+    if (running) btn.textContent = 'Import running\u2026';
+    else if (!taWatching) btn.textContent = 'Check for updates now';
+    return running;
+  }
+  if (!s.gh) { sub.textContent += ' \u00b7 GitHub CLI not found \u2014 button disabled'; btn.disabled = true; }
+  if (s.error) sub.textContent += ' \u00b7 ' + s.error;
+  return false;
+}
+async function taRefresh(){
+  const btn = document.getElementById('ta-btn');
+  btn.disabled = true; btn.textContent = 'Starting\u2026';
+  const force = document.getElementById('ta-force').checked ? 1 : 0;
+  try {
+    const r = await fetch('/ta_refresh?force=' + force);
+    const j = await r.json();
+    if (!j.ok) { document.getElementById('ta-sub').textContent = 'Could not start: ' + j.error; btn.disabled=false; btn.textContent='Check for updates now'; return; }
+  } catch(e){ btn.disabled=false; btn.textContent='Check for updates now'; return; }
+  taWatching = true;
+  await new Promise(r => setTimeout(r, 6000));     // let GitHub register the run
+  for (let i = 0; i < 60; i++) {                   // poll up to ~3 min
+    const running = await taLoad();
+    if (running === false) break;
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  taWatching = false;
+  btn.disabled = false; btn.textContent = 'Check for updates now';
+  await taLoad();
+}
+taLoad();
+setInterval(() => { if (!taWatching) taLoad(); }, 60000);
 </script>
 </body></html>"""
 
@@ -526,6 +597,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/":
             self._send(form_page())
+            return
+
+        if path == "/ta_status":
+            self._send_json(ta_status())
+            return
+
+        if path == "/ta_refresh":
+            q = parse_qs(parsed.query)
+            force = q.get("force", ["0"])[0] == "1"
+            try:
+                ta_refresh(force)
+                self._send_json({"ok": True})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
             return
 
         if path == "/status":
@@ -563,6 +648,66 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send(form_page(), 404)
+
+
+GH_REPO = "SLC-Online/fpl-price-tracker"
+GH_WORKFLOW = "scrape_patreon.yml"
+
+
+def _find_gh():
+    """Locate the GitHub CLI. A double-clicked .app has a minimal PATH, so
+    check the usual install locations explicitly."""
+    import shutil
+    for p in (shutil.which("gh"), "/opt/homebrew/bin/gh", "/usr/local/bin/gh"):
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def _run_gh(args, timeout=30):
+    import subprocess
+    gh = _find_gh()
+    if not gh:
+        raise RuntimeError("GitHub CLI (gh) not found")
+    r = subprocess.run([gh] + args, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "gh failed").strip()[:300])
+    return r.stdout
+
+
+def ta_status():
+    """Latest Transfer Algorithm capture in Supabase + latest import-workflow run."""
+    import json as _json
+    out = {"capture": None, "run": None, "gh": bool(_find_gh()), "error": None}
+    try:
+        url, key = O.load_env()
+        h = {"apikey": key, "Authorization": "Bearer " + key}
+        r = O.requests.get(
+            url.rstrip("/") + "/rest/v1/projection_captures", headers=h, timeout=20,
+            params={"select": "captured_at,uploaded_for_gw,row_count,player_count",
+                    "source_id": "eq.1", "order": "captured_at.desc", "limit": "1"})
+        rows = r.json()
+        if rows:
+            out["capture"] = rows[0]
+    except Exception as e:
+        out["error"] = f"Supabase: {e}"
+    if out["gh"]:
+        try:
+            raw = _run_gh(["run", "list", "-R", GH_REPO, "--workflow", GH_WORKFLOW,
+                           "--limit", "1", "--json", "status,conclusion,createdAt,event"])
+            runs = _json.loads(raw)
+            if runs:
+                out["run"] = runs[0]
+        except Exception as e:
+            out["error"] = (out["error"] or "") + f" GitHub: {e}"
+    return out
+
+
+def ta_refresh(force=False):
+    args = ["workflow", "run", GH_WORKFLOW, "-R", GH_REPO]
+    if force:
+        args += ["-f", "force_reimport=true"]
+    _run_gh(args)
 
 
 JOBS = {}
