@@ -15,22 +15,34 @@ from urllib.parse import quote
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 FPL_BASE = "https://fantasy.premierleague.com/api"
+# FPL sits behind bot protection that is stricter on the default python-requests
+# user agent, especially from cloud IPs at busy times; identify as a browser.
+FPL_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"),
+    "Accept": "application/json",
+}
+# Statuses worth retrying: blocked/rate-limited (403/429) and server-side errors.
+FPL_RETRY_STATUSES = {403, 429, 500, 502, 503, 504}
 
 
-def fetch_fpl(url, retries=3):
-    """Fetch FPL API with retry logic."""
+def fetch_fpl(url, retries=4):
+    """Fetch FPL API with retry/backoff on transient blocks, server errors and timeouts."""
     for attempt in range(retries):
+        last_attempt = attempt == retries - 1
+        wait = 20 * (attempt + 1)   # 20s, 40s, 60s
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(url, headers=FPL_HEADERS, timeout=30)
             if resp.status_code == 200:
                 return resp.json()
-            if resp.status_code == 503 and attempt < retries - 1:
-                time.sleep(30)
+            if resp.status_code in FPL_RETRY_STATUSES and not last_attempt:
+                print(f"  FPL API returned {resp.status_code}, retrying in {wait}s…", flush=True)
+                time.sleep(wait)
                 continue
             raise Exception(f"FPL API {url} returned {resp.status_code}")
-        except requests.exceptions.Timeout:
-            if attempt < retries - 1:
-                time.sleep(10)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if not last_attempt:
+                time.sleep(wait)
                 continue
             raise
     raise Exception(f"FPL API {url} failed after {retries} attempts")
