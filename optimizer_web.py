@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Browser-based FPL transfer optimizer UI.
+FPL Optimiser: the transfer optimiser UI, served locally.
 
-macOS ships a deprecated Tk 8.5 that renders blank Tkinter windows, and no
-Homebrew Python here has tkinter at all. So instead of a desktop window, this
-serves the SAME optimizer engine as a local web page using only the Python
-standard library — no installs, runs on /usr/bin/python3.
+Normally run by the FPL Optimiser Mac app (mac_app/), which starts this server
+in the background and shows it in a native window. Uses only the Python
+standard library, so it runs on the system /usr/bin/python3.
+
+To run it on its own for development:
 
     cd /Users/edbeesley/world-cup-fantasy/fpl_project
     /usr/bin/python3 optimizer_web.py
 
-Then open http://127.0.0.1:18765 in your browser.
+Then open http://127.0.0.1:18765.
 
 It reuses optimizer_app.py (engine, FPL API, Supabase loader) and
 optimize_from_csv.py (CSV parsing + name matching) unchanged, so the numbers
@@ -285,7 +286,7 @@ def render_result(res):
 
 
 PAGE = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>FPL Transfer Optimizer</title>
+<html><head><meta charset="utf-8"><title>FPL Optimiser</title>
 <style>
  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;
    margin:0;background:#0f1419;color:#e6e6e6}
@@ -382,7 +383,7 @@ PAGE = r"""<!doctype html>
  .ta-menu .d{display:block;font-size:11px;color:#8a97a5;margin-top:1px}
 </style></head><body>
 <header class="hdr">
- <h1>FPL Transfer Optimizer <span class="muted">— one tab per team · runs in parallel</span></h1>
+ <h1>FPL Transfer Optimiser <span class="muted">— one tab per team · runs in parallel</span></h1>
  <div id="ta" class="ta">
    <span id="ta-dot" class="ta-dot"></span>
    <div class="ta-text">
@@ -411,7 +412,7 @@ PAGE = r"""<!doctype html>
  <div id="panels"></div>
 </main>
 <script>
-// Each tab is an independent optimization: its own form, job, polling, results.
+// Each tab is an independent optimisation: its own form, job, polling, results.
 const DEFAULT_CSV = "__DEFAULT_CSV__";
 let seq = 0;
 const tabs = [];           // {id, name, state, el, panel, form, job, timer, startTs}
@@ -507,7 +508,7 @@ function panelHTML(){
       <input name="free" value=""></label>
     <label>Decay
       <input name="decay" value="0.85"></label>
-    <button class="run" type="submit">Run optimization</button>
+    <button class="run" type="submit">Run optimisation</button>
   </form>
   <div class="progress card hidden">
     <h3>Running\u2026 <span class="elapsed muted"></span></h3>
@@ -637,7 +638,7 @@ function wire(t){
     t.startTs = Date.now();
     let job;
     try { job = (await (await fetch('/run?'+params)).json()).job; }
-    catch(e){ plog.textContent='Failed to start: '+e; btn.disabled=false; btn.textContent='Run optimization'; t.state='error'; renderTabBar(); return; }
+    catch(e){ plog.textContent='Failed to start: '+e; btn.disabled=false; btn.textContent='Run optimisation'; t.state='error'; renderTabBar(); return; }
     t.job = job;
     if (t.timer) clearInterval(t.timer);
     t.timer = setInterval(()=>poll(t), 1200);
@@ -659,7 +660,7 @@ function wire(t){
       clearInterval(t.timer); t.timer=null;
       prog.classList.add('hidden');
       results.innerHTML = s.html || '';
-      btn.disabled=false; btn.textContent='Run optimization';
+      btn.disabled=false; btn.textContent='Run optimisation';
       t.state = s.state; renderTabBar();
     }
   }
@@ -780,9 +781,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(form_page())
             return
 
+        if path == "/busy":
+            running = sum(1 for j in JOBS.values() if j["state"] == "running")
+            self._send_json({"running": running})
+            return
+
         if path == "/health":
             # Lets the .app launcher confirm the thing on this port is us.
-            self._send_json({"app": "fpl-optimizer"})
+            self._send_json({"app": "fpl-optimiser"})
             return
 
         if path == "/entry_info":
@@ -955,11 +961,26 @@ def _start_job(params):
     return job_id
 
 
+def _watch_parent(pid):
+    """Exit when the app that launched us is gone, so the server never lingers."""
+    import time as _time
+    while True:
+        _time.sleep(2)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            os._exit(0)
+
+
 def main():
+    parent = os.environ.get("OPT_PARENT_PID")
+    if parent and parent.isdigit():
+        threading.Thread(target=_watch_parent, args=(int(parent),), daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}"
-    print(f"FPL optimizer UI running at {url}")
-    print("Open that URL in your browser. Press Ctrl+C to stop.")
+    print(f"FPL Optimiser running at {url}")
+    if not parent:
+        print("Open that URL in your browser. Press Ctrl+C to stop.")
     # Auto-open the browser unless told not to (the .app launcher opens it).
     if os.environ.get("OPT_NO_BROWSER") != "1":
         try:

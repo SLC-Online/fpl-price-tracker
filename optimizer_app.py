@@ -133,7 +133,7 @@ def fpl_get(path):
     for attempt in range(4):
         try:
             r = requests.get(f"{FPL_BASE}/{path}",
-                             headers={"User-Agent": "FPL-Optimizer/1.0"}, timeout=30)
+                             headers={"User-Agent": "FPL-Optimiser/1.0"}, timeout=30)
             r.raise_for_status()
             return r.json()
         except (requests.exceptions.Timeout,

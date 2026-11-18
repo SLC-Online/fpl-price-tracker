@@ -57,3 +57,6 @@ supabase/**/.DS_Store
 
 # App server log
 .app_server.log
+
+# Mac app build output
+mac_app/build/
