@@ -10,7 +10,7 @@ standard library — no installs, runs on /usr/bin/python3.
     cd /Users/edbeesley/world-cup-fantasy/fpl_project
     /usr/bin/python3 optimizer_web.py
 
-Then open http://127.0.0.1:8765 in your browser.
+Then open http://127.0.0.1:18765 in your browser.
 
 It reuses optimizer_app.py (engine, FPL API, Supabase loader) and
 optimize_from_csv.py (CSV parsing + name matching) unchanged, so the numbers
@@ -29,7 +29,7 @@ import optimizer_app as O
 import optimize_from_csv as C
 
 HOST = "127.0.0.1"
-PORT = int(os.environ.get("OPT_PORT", "8765"))
+PORT = int(os.environ.get("OPT_PORT", "18765"))
 
 DEFAULT_CSV = "/Users/edbeesley/Downloads/TransferAlgorithm.csv"
 
@@ -309,6 +309,28 @@ PAGE = r"""<!doctype html>
  input,select{padding:8px;border-radius:6px;border:1px solid #2c3a49;
    background:#0f1419;color:#e6e6e6;font-size:14px}
  .full{grid-column:1/3}
+ /* manager ID field + saved teams */
+ .field{display:flex;flex-direction:column;gap:4px}
+ .flabel{font-size:12px;color:#9fb0c0}
+ .idrow{display:flex;gap:6px}
+ .idrow input{flex:1;min-width:0}
+ .star{flex:none;width:36px;display:flex;align-items:center;justify-content:center;border-radius:6px;
+   border:1px solid #2c3a49;background:#0f1419;color:#475569;cursor:pointer;padding:0}
+ .star:hover{color:#cbd5e1;border-color:#3a4a5a}
+ .star.on{color:#f59e0b}
+ .star.on svg{fill:currentColor}
+ .idhint{font-size:11px;color:#8a97a5;min-height:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .idhint.bad{color:#f77}
+ .saved{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:4px;
+   border-bottom:1px solid #26313d;margin-bottom:2px}
+ .saved.hidden{display:none}
+ .saved-label{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#8a97a5}
+ .chips{display:flex;flex-wrap:wrap;gap:6px}
+ .chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;cursor:pointer;
+   background:#1d2a36;border:1px solid #26313d;color:#e6e6e6;font-size:12px}
+ .chip:hover{border-color:#6366f1}
+ .chip.active{border-color:#6366f1;background:#232f5a}
+ .chip .cid{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8a97a5}
  button.run{grid-column:1/3;padding:12px;border:0;border-radius:8px;
    background:#2f81f7;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
  button.run:hover{background:#1f6feb}
@@ -395,6 +417,7 @@ let seq = 0;
 const tabs = [];           // {id, name, state, el, panel, form, job, timer, startTs}
 let activeId = null;
 
+function escHtml(x){ return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function glyphFor(state){
   return state==='running' ? '<span class="glyph" style="color:#f7b955">\u27f3</span>'
        : state==='done'    ? '<span class="glyph" style="color:#7ee787">\u2713</span>'
@@ -408,7 +431,7 @@ function renderTabBar(){
   tabs.forEach(t => {
     const d = document.createElement('div');
     d.className = 'tab' + (t.id===activeId ? ' active' : '');
-    d.innerHTML = glyphFor(t.state) + '<span>'+ (t.name||'New') +'</span>'
+    d.innerHTML = glyphFor(t.state) + '<span>'+ escHtml(t.name||'New') +'</span>'
                 + '<span class="close" title="close">\u00d7</span>';
     d.onclick = (e) => {
       if (e.target.classList.contains('close')) { closeTab(t.id); return; }
@@ -443,8 +466,17 @@ function closeTab(id){
 function panelHTML(){
   return `
   <form onsubmit="return false;">
-    <label>Manager ID
-      <input name="manager_id" value="403851" required></label>
+    <div class="saved full hidden"><span class="saved-label">Saved</span><div class="chips"></div></div>
+    <div class="field">
+      <span class="flabel">Manager ID</span>
+      <div class="idrow">
+        <input name="manager_id" value="403851" required autocomplete="off">
+        <button type="button" class="star" title="Save this team" aria-label="Save this team">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>
+        </button>
+      </div>
+      <span class="idhint"></span>
+    </div>
     <label>Max transfers to search
       <input name="transfers" type="number" min="1" max="5" value="2"></label>
     <label>Search method
@@ -486,6 +518,88 @@ function panelHTML(){
   <div class="results"></div>`;
 }
 
+// ---- Saved teams (this browser only, via localStorage) ----
+const SAVED_KEY = 'opt.savedTeams.v1';
+function getSaved(){
+  try { const v = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]'); return Array.isArray(v) ? v : []; }
+  catch(e){ return []; }
+}
+function setSaved(v){
+  try { localStorage.setItem(SAVED_KEY, JSON.stringify(v)); } catch(e){}
+  tabs.forEach(t => { renderSaved(t); refreshStar(t); });
+}
+const infoCache = {};
+async function entryInfo(id){
+  if (infoCache[id]) return infoCache[id];
+  try {
+    const j = await (await fetch('/entry_info?id=' + id)).json();
+    if (j.ok || j.error === 'not_found') infoCache[id] = j;
+    return j;
+  } catch(e){ return {ok:false, error:'network'}; }
+}
+function currentId(t){
+  const v = t.form.manager_id.value.trim();
+  return /^\d+$/.test(v) ? parseInt(v, 10) : null;
+}
+function refreshStar(t){
+  const id = currentId(t), star = t.form.querySelector('.star');
+  const on = id != null && getSaved().some(s => s.id === id);
+  star.classList.toggle('on', on);
+  star.disabled = id == null;
+  star.title = on ? 'Saved \u2014 click to remove' : 'Save this team';
+  t.panel.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', +c.dataset.id === id));
+}
+function renderSaved(t){
+  const wrap = t.panel.querySelector('.saved'), chips = t.panel.querySelector('.chips');
+  const saved = getSaved();
+  chips.textContent = '';
+  wrap.classList.toggle('hidden', saved.length === 0);
+  saved.forEach(s => {
+    const c = document.createElement('button');
+    c.type = 'button'; c.className = 'chip'; c.dataset.id = s.id;
+    c.title = s.manager;
+    const n = document.createElement('span'); n.textContent = s.team;
+    const i = document.createElement('span'); i.className = 'cid'; i.textContent = s.id;
+    c.append(n, i);
+    c.onclick = () => { t.form.manager_id.value = s.id; onIdChange(t, true); };
+    chips.appendChild(c);
+  });
+  refreshStar(t);
+}
+async function onIdChange(t, immediate){
+  clearTimeout(t.idTimer);
+  refreshStar(t);
+  const hint = t.form.querySelector('.idhint');
+  const id = currentId(t);
+  t.teamName = null;
+  if (t.state !== 'running') { t.name = id != null ? (infoCache[id]?.team || String(id)) : 'New'; renderTabBar(); }
+  if (id == null) { hint.textContent = ''; hint.classList.remove('bad'); return; }
+  const run = async () => {
+    hint.classList.remove('bad');
+    if (!infoCache[id]) hint.textContent = 'Looking up\u2026';
+    const info = await entryInfo(id);
+    if (currentId(t) !== id) return;             // input changed while we waited
+    if (info.ok) {
+      hint.textContent = info.team + ' \u00b7 ' + info.manager;
+      t.teamName = info.team;
+      if (t.state !== 'running') { t.name = info.team; renderTabBar(); }
+    } else {
+      hint.textContent = info.error === 'not_found' ? 'No FPL team with that ID' : 'Couldn\u2019t look up this ID';
+      hint.classList.add('bad');
+    }
+  };
+  if (immediate) run(); else t.idTimer = setTimeout(run, 400);
+}
+async function toggleStar(t){
+  const id = currentId(t);
+  if (id == null) return;
+  const saved = getSaved();
+  if (saved.some(s => s.id === id)) { setSaved(saved.filter(s => s.id !== id)); return; }
+  const info = await entryInfo(id);
+  if (!info.ok) { onIdChange(t, true); return; }  // shows "No FPL team with that ID"
+  setSaved([...getSaved().filter(s => s.id !== id), {id, team: info.team, manager: info.manager}]);
+}
+
 function newTab(){
   seq += 1;
   const id = seq;
@@ -497,10 +611,16 @@ function newTab(){
              job:null, timer:null, startTs:0};
   tabs.push(t);
   wire(t);
+  const firstSaved = getSaved()[0];
+  if (firstSaved) t.form.manager_id.value = firstSaved.id;
+  renderSaved(t);
+  onIdChange(t, true);
   activate(id);
 }
 
 function wire(t){
+  t.form.manager_id.addEventListener('input', () => onIdChange(t));
+  t.form.querySelector('.star').addEventListener('click', () => toggleStar(t));
   const btn = t.form.querySelector('button.run');
   const prog = t.panel.querySelector('.progress');
   const plog = t.panel.querySelector('.plog');
@@ -509,7 +629,7 @@ function wire(t){
 
   t.form.addEventListener('submit', async () => {
     const params = new URLSearchParams(new FormData(t.form)).toString();
-    t.name = t.form.manager_id.value || 'New';
+    t.name = t.teamName || t.form.manager_id.value || 'New';
     t.state = 'running'; renderTabBar();
     results.innerHTML = ''; plog.textContent = '';
     prog.classList.remove('hidden');
@@ -658,6 +778,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/":
             self._send(form_page())
+            return
+
+        if path == "/health":
+            # Lets the .app launcher confirm the thing on this port is us.
+            self._send_json({"app": "fpl-optimizer"})
+            return
+
+        if path == "/entry_info":
+            q = parse_qs(parsed.query)
+            raw = q.get("id", [""])[0].strip()
+            if not raw.isdigit():
+                self._send_json({"ok": False, "error": "bad_id"}, 400)
+                return
+            try:
+                e = O.fpl_get(f"entry/{int(raw)}/")
+                self._send_json({"ok": True, "id": e["id"], "team": e["name"],
+                                 "manager": f'{e["player_first_name"]} {e["player_last_name"]}'})
+            except Exception as ex:
+                status = getattr(getattr(ex, "response", None), "status_code", None)
+                if status == 404:
+                    self._send_json({"ok": False, "error": "not_found"}, 404)
+                else:
+                    self._send_json({"ok": False, "error": str(ex)[:200]}, 502)
             return
 
         if path == "/ta_status":

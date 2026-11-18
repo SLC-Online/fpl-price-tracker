@@ -20,7 +20,7 @@ fi
 clear
 echo "============================================================"
 echo "  FPL Transfer Optimizer"
-echo "  Your browser will open at http://127.0.0.1:8765"
+echo "  Your browser will open at http://127.0.0.1:18765"
 echo "  Leave this window open while you use it."
 echo "  Close this window (or press Ctrl+C) to stop."
 echo "============================================================"
