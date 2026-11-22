@@ -2,9 +2,16 @@ name: FPL Data Scrape
 
 on:
   schedule:
-    # Every hour
-    - cron: '0 * * * *'
-  workflow_dispatch:  # Allow manual trigger
+    # Backup only. GitHub runs scheduled jobs late or drops them (we saw ~4 runs
+    # a day against 24 asked for), so the real hourly trigger is Supabase pg_cron
+    # calling workflow_dispatch (supabase/migrations/006_scheduled_triggers.sql).
+    - cron: '23 */3 * * *'
+  workflow_dispatch:  # Supabase scheduler, admin Sync button, manual runs
+
+# Never run two scrapes at once; a second trigger waits for the first.
+concurrency:
+  group: fpl-data-scrape
+  cancel-in-progress: false
 
 jobs:
   scrape:

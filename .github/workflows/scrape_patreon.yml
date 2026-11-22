@@ -2,16 +2,22 @@ name: Import Transfer Algorithm from Patreon
 
 on:
   schedule:
-    # Every 15 minutes — the check is one cheap API call (~10s)
-    # Only downloads/imports when a newer post is detected
-    # Cost: ~490 of 2000 free Actions minutes per month
-    - cron: '*/15 * * * *'
+    # Backup only. GitHub runs scheduled jobs late or drops them (we saw ~4 runs
+    # a day against 96 asked for), so the real 15-minute trigger is Supabase
+    # pg_cron calling workflow_dispatch (supabase/migrations/006_scheduled_triggers.sql).
+    # Each check is one cheap API call; it only imports when the post has changed.
+    - cron: '41 */2 * * *'
   workflow_dispatch:  # Manual trigger
     inputs:
       force_reimport:
         description: 'Re-import the latest post even if already imported (fixes/refreshes data)'
         type: boolean
         default: false
+
+# Never run two imports at once; a second trigger waits for the first.
+concurrency:
+  group: patreon-import
+  cancel-in-progress: false
 
 jobs:
   import:
