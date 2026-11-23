@@ -180,36 +180,27 @@ def selling_price(purchase, current):
     return purchase + (current - purchase) // 2
 
 
-def compute_free_transfers(manager_id, next_gw, chips):
-    """Free transfers available going into next_gw.
+def compute_free_transfers(history_rows, next_gw, chips, cap=5):
+    """Free transfers going into next_gw, replayed from the season history.
 
-    There is no transfer at GW1 — you just pick your initial squad, so FTs only
-    begin to exist from GW2. You get 1 free transfer at GW2, and each subsequent
-    gameweek you bank +1 (capped at 5), minus any transfers already made that GW.
-    Wildcard/Free-Hit gameweeks don't consume banked FTs.
+    Rules (checked against FPL's own hit charges for ~900 managers, see
+    fpl-tracker/scripts/prices/ft_rule_check.mjs):
+      - no transfers in a team's first gameweek; one free transfer the week after;
+      - each normal week: unused free transfers roll over, plus one, up to 5;
+      - a Wildcard or Free Hit week keeps the banked transfers but adds none.
     """
-    if next_gw <= 1:
-        return 0
-    transfers = fpl_get(f"entry/{manager_id}/transfers/")
-    by_gw = {}
-    for t in transfers:
-        by_gw[t["event"]] = by_gw.get(t["event"], 0) + 1
-    chip_gw = {c["event"]: c["name"] for c in chips if c.get("name") in ("wildcard", "freehit")}
-
-    ft = 1  # GW2 is the first gameweek a free transfer exists
-    # simulate completed gameweeks GW2 .. next_gw-1
-    for gw in range(3, next_gw):
-        ft = min(5, ft + 1)
-        if gw in chip_gw:
+    chip_at = {c["event"]: c["name"] for c in chips}
+    ft = None
+    for h in sorted(history_rows, key=lambda r: r["event"]):
+        if h["event"] >= next_gw:
+            break
+        if ft is None:
+            ft = 1
             continue
-        ft = max(0, ft - by_gw.get(gw, 0))
-    # account for any transfers already made in GW2 (the seed week)
-    if 2 < next_gw:
-        ft = max(0, ft - by_gw.get(2, 0)) if 2 not in chip_gw else ft
-    # bank the +1 for next_gw itself (unless next_gw is GW2, already seeded)
-    if next_gw > 2:
-        ft = min(5, ft + 1)
-    return ft
+        if chip_at.get(h["event"]) in ("wildcard", "freehit"):
+            continue
+        ft = min(cap, max(0, ft - h["event_transfers"]) + 1)
+    return ft or 0
 
 
 def get_manager_squad(manager_id, bootstrap):
@@ -233,16 +224,24 @@ def get_manager_squad(manager_id, bootstrap):
     try:
         history = fpl_get(f"entry/{manager_id}/history/")
         chips = history.get("chips", [])
+        history_rows = history.get("current", [])
     except Exception:
         chips = []
+        history_rows = []
 
     # current prices from bootstrap
     price_by_id = {e["id"]: e for e in bootstrap["elements"]}
 
-    # purchase price: from transfers if bought, else start-of-season price
+    # purchase price: the most recent purchase (FPL lists transfers newest
+    # first; Free Hit weeks don't count, the squad reverts), else the
+    # start-of-season price. The website replays the whole season and checks
+    # it against FPL's figures; this is the quick version.
+    fh_weeks = {c["event"] for c in chips if c.get("name") == "freehit"}
     purchase = {}
     for t in transfers:
-        purchase[t["element_in"]] = t["element_in_cost"]
+        if t["event"] in fh_weeks:
+            continue
+        purchase.setdefault(t["element_in"], t["element_in_cost"])
 
     squad_ids = []
     purchase_prices = {}
@@ -258,7 +257,7 @@ def get_manager_squad(manager_id, bootstrap):
         purchase_prices[eid] = pp
 
     bank = picks["entry_history"]["bank"]
-    ft = compute_free_transfers(manager_id, next_gw, chips)
+    ft = compute_free_transfers(history_rows, next_gw, chips)
 
     manager = {
         "name": f"{entry.get('player_first_name','')} {entry.get('player_last_name','')}".strip(),
