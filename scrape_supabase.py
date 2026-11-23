@@ -144,8 +144,11 @@ def scrape():
         raise Exception("Failed to retrieve snapshot_id after insert")
     snapshot_id = snaps[0]['snapshot_id']
 
-    # Get previous snapshot's prices for change detection
-    prev_snap = supabase_get("snapshots",
+    # Previous prices for change detection: the latest earlier snapshot that
+    # actually has player rows. A run that failed after creating its snapshot
+    # row leaves an empty snapshot; comparing against that silently missed
+    # every price change in the gap (e.g. snapshots 251 and 260).
+    prev_snap = supabase_get("player_snapshots",
         f"snapshot_id=lt.{snapshot_id}&select=snapshot_id&order=snapshot_id.desc&limit=1")
     prev_prices = {}
     if prev_snap:
